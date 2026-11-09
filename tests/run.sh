@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+#
+# Portability tests. Needs only bash 4+ and the platform's own awk/sed/date/
+# sort/find - no Docker: docker calls are answered from tests/fixtures.
+# Run on each platform you want to support:  ./tests/run.sh
+#
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+ROOT="$PWD"
+SCRIPT="$ROOT/docker-stacks-manager.sh"
+
+failures=0
+pass() { printf '  \033[0;32mok\033[0m   %s\n' "$1"; }
+fail() { printf '  \033[0;31mFAIL\033[0m %s\n' "$1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/       /'; failures=$((failures + 1)); }
+check() { # check <description> <command...>
+    local desc="$1"; shift
+    if "$@"; then pass "$desc"; else fail "$desc"; fi
+}
+ESC=$'\033'
+strip_ansi() { sed "s/${ESC}\[[0-9;?]*[a-zA-Z]//g"; }  # BSD sed has no \x1b
+# Load single functions from the script without running it
+load_fn() { eval "$(sed -n "/^$1() {/,/^}/p" "$SCRIPT")"; }
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+echo "Platform: $(uname -s) $(uname -r), bash $BASH_VERSION"
+
+# --------------------------------------------------------------------------
+echo "Unit tests"
+
+load_fn date_to_epoch
+for tz in UTC Europe/Stockholm America/New_York Asia/Tokyo; do
+    got=$(TZ=$tz date_to_epoch "2026-01-01T00:00:00.123456789Z")
+    [[ "$got" == 1767225600 ]] && pass "date_to_epoch reads Docker timestamps as UTC (TZ=$tz)" \
+        || fail "date_to_epoch reads Docker timestamps as UTC (TZ=$tz)" "expected 1767225600, got '$got'"
+done
+got=$(date_to_epoch "2026-01-01T00:00:00Z")
+[[ "$got" == 1767225600 ]] && pass "date_to_epoch without fractional seconds" \
+    || fail "date_to_epoch without fractional seconds" "expected 1767225600, got '$got'"
+
+eval "$(sed -n '/^COMPOSE_FILENAMES=/p' "$SCRIPT")"
+load_fn find_compose_files
+mkdir -p "$TMP/stacks/a" "$TMP/stacks/b b" "$TMP/stacks/c" "$TMP/stacks/d/nested" "$TMP/stacks/e"
+touch "$TMP/stacks/a/compose.yaml" "$TMP/stacks/b b/docker-compose.yml" \
+      "$TMP/stacks/c/docker-compose.yml" "$TMP/stacks/c/compose.yml" \
+      "$TMP/stacks/d/nested/compose.yaml" "$TMP/stacks/e/notes.txt"
+got=$(BASE_DIR="$TMP/stacks" find_compose_files | sed "s|^$TMP/stacks/||")
+expected=$'a/compose.yaml\nb b/docker-compose.yml\nc/compose.yml'
+[[ "$got" == "$expected" ]] && pass "find_compose_files: all names, one per stack, preferred name wins" \
+    || fail "find_compose_files: all names, one per stack, preferred name wins" "expected:"$'\n'"$expected"$'\n'"got:"$'\n'"$got"
+
+load_fn version_gt
+check "version_gt: newer minor" version_gt 1.10.0 1.9.3
+check "version_gt: tag prefix and extra part" version_gt v1.0.1 1.0
+not() { ! "$@"; }
+check "version_gt: equal is not newer" not version_gt 1.0.0 1.0.0
+check "version_gt: older is not newer" not version_gt 1.0.0 1.0.1
+
+load_fn self_path
+mkdir -p "$TMP/real dir" "$TMP/bin"
+touch "$TMP/real dir/tool.sh"
+ln -s "../real dir/tool.sh" "$TMP/bin/rel-link"
+ln -s "$TMP/bin/rel-link" "$TMP/bin/abs-link"
+got=$(self_path "$TMP/bin/abs-link")
+expected="$(cd -P "$TMP/real dir" && pwd)/tool.sh"
+[[ "$got" == "$expected" ]] && pass "self_path follows relative and absolute symlinks" \
+    || fail "self_path follows relative and absolute symlinks" "expected '$expected', got '$got'"
+
+# Watchtower: docker is replaced by a shell function returning canned answers
+for fn in epoch_to_local format_duration watchtower_time_to_epoch watchtower_next_check watchtower_last_session; do
+    load_fn "$fn"
+done
+GREEN="" YELLOW="" DIM="" NC=""
+WT_ENV="" WT_FULL_LOGS=""
+docker() {
+    case "$1" in
+        inspect) printf '%s\n' "$WT_ENV" ;;
+        logs) printf '%s\n' "$WT_FULL_LOGS" ;;
+    esac
+}
+expect() { # expect <description> <actual> <extended regex>
+    if printf '%s\n' "$2" | grep -qE -- "$3"; then pass "$1"
+    else fail "$1" "expected to match: $3"$'\n'"got: '$2'"; fi
+}
+
+got=$(watchtower_next_check wt 'time="x" level=debug msg="Scheduled next run: 2099-01-01 04:00:00 +0100 CET"')
+expect "watchtower: uses logged next run when in the future" "$got" '^2099-01-01 04:00 CET$'
+
+WT_ENV=$'WATCHTOWER_SCHEDULE=0 0 4 * * *\nTZ=UTC'
+got=$(TZ=UTC watchtower_next_check wt 'msg="Scheduled next run: 2020-01-01 04:00:00 +0100 CET"')
+expect "watchtower: stale logged run ignored, daily cron resolved" "$got" '^[0-9]{4}-[0-9]{2}-[0-9]{2} 04:00 UTC \(daily\)$'
+
+WT_ENV=$'WATCHTOWER_SCHEDULE="0 30 4 * * *"\nTZ=Asia/Tokyo'
+got=$(TZ=America/New_York watchtower_next_check wt "")
+expect "watchtower: daily cron shown in the container's time zone" "$got" '^[0-9]{4}-[0-9]{2}-[0-9]{2} 04:30 JST \(daily\)$'
+
+WT_ENV='WATCHTOWER_SCHEDULE=0 */5 * * * *'
+got=$(watchtower_next_check wt "")
+expect "watchtower: other cron schedules shown as-is" "$got" '^schedule: 0 \*/5 \* \* \* \*$'
+
+WT_ENV='WATCHTOWER_POLL_INTERVAL=3600'
+WT_FULL_LOGS='time="2020-01-01T00:00:00Z" level=info msg="Scheduling first run: 2020-01-01 00:00:00 +0000 UTC"'
+got=$(TZ=UTC watchtower_next_check wt "")
+expect "watchtower: poll interval counted from first run" "$got" '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:00 UTC \(every 1h\)$'
+
+WT_ENV="" WT_FULL_LOGS=""
+got=$(watchtower_next_check wt "")
+expect "watchtower: default 24h poll interval" "$got" '^every 24h$'
+
+session_logs='time="2026-11-07T04:00:00+01:00" level=info msg="Session done" Failed=0 Scanned=3 Updated=0 notify=no
+time="2026-11-08T04:01:19+01:00" level=info msg="Unable to update container \"/app-db\": Error response from daemon: failed to resolve reference"
+time="2026-11-08T04:01:24+01:00" level=info msg="Found new example/web:latest image (44a82caf5b86)"
+time="2026-11-08T04:01:53+01:00" level=info msg="Stopping /web (0a5399da2f5a) with SIGTERM"
+time="2026-11-08T04:02:08+01:00" level=info msg="Creating /web"
+time="2026-11-08T04:02:09+01:00" level=info msg="Creating /web-worker"
+time="2026-11-08T04:02:12+01:00" level=info msg="Session done" Failed=0 Scanned=3 Updated=2 notify=no
+time="2026-11-08T04:02:12+01:00" level=debug msg="Scheduled next run: 2026-11-09 04:00:00 +0100 CET"'
+got=$(watchtower_last_session "$session_logs")
+expect "watchtower: last session time and counts" "$got" 'Last check: 2026-11-08 04:02 \(3 scanned, 2 updated\)'
+expect "watchtower: new images listed" "$got" 'New images: example/web:latest$'
+expect "watchtower: recreated containers listed" "$got" 'Recreated: web, web-worker$'
+expect "watchtower: unreachable containers listed" "$got" 'Could not check: app-db '
+got=$(watchtower_last_session "$(printf '%s\n' "$session_logs" | head -1)")
+expect "watchtower: quiet session says no updates" "$got" 'No updates needed'
+unset -f docker
+
+# Snapshot: classification and stack matching, with canned docker output
+for fn in compose_project_name load_snapshot stack_badge container_dot container_summary format_uptime; do
+    load_fn "$fn"
+done
+eval "$(sed -n '/^# Per stack (index/,/^SNAPSHOT_TIME=/p' "$SCRIPT")"   # the snapshot's arrays
+GREEN="" YELLOW="" RED="" CYAN="" DIM="" NC=""
+mkdir -p "$TMP/snap/app" "$TMP/snap/My Stack" "$TMP/snap/jobs" "$TMP/snap/empty"
+for d in app "My Stack" jobs empty; do touch "$TMP/snap/$d/compose.yaml"; done
+PS_OUT="app|$TMP/snap/app|web|aaaaaaaaaaa1|app-web-1|running|Up 2 hours (healthy)
+app|$TMP/snap/app|db|aaaaaaaaaaa2|app-db-1|running|Up 2 hours (unhealthy)
+mystack|/somewhere/else/My Stack|api|bbbbbbbbbbb1|mystack-api-1|running|Up 5 minutes
+mystack|/somewhere/else/My Stack|cron|bbbbbbbbbbb2|mystack-cron-1|exited|Exited (1) 1 hour ago
+jobs|$TMP/snap/jobs|seed|ccccccccccc1|jobs-seed-1|exited|Exited (0) 3 days ago
+other|/not/a/stack/here|x|ddddddddddd1|other-x-1|running|Up 1 minute"
+INSPECT_OUT="aaaaaaaaaaa1ffff|2026-01-01T00:00:00Z|0|true|nginx:1|bridge|0|unless-stopped|80/tcp -> 8080 |app_default=172.20.0.2 
+aaaaaaaaaaa2ffff|2026-01-01T00:00:00Z|3||postgres:16|bridge|0|unless-stopped||app_default=172.20.0.3 
+bbbbbbbbbbb1ffff|2026-01-01T00:00:00Z|0||api:1|container:aaaaaaaaaaa1ffff|0|always||
+bbbbbbbbbbb2ffff|0001-01-01T00:00:00Z|0||cron:1|bridge|1|unless-stopped||
+ccccccccccc1ffff|0001-01-01T00:00:00Z|0||seed:1|bridge|0|no||"
+docker() {
+    case "$1" in
+        ps) printf '%s\n' "$PS_OUT" ;;
+        inspect) printf '%s\n' "$INSPECT_OUT" ;;
+    esac
+}
+BASE_DIR="$TMP/snap" load_snapshot
+idx() { local i; for i in "${!STACK_NAMES[@]}"; do [ "${STACK_NAMES[i]}" = "$1" ] && echo "$i"; done; }
+a=$(idx app) m=$(idx "My Stack") j=$(idx jobs) e=$(idx empty)
+expect "snapshot: matched by working directory" "${STACK_CIDS[a]}" '^aaaaaaaaaaa2 aaaaaaaaaaa1 $'
+expect "snapshot: matched by project name when the directory differs" "${STACK_CIDS[m]}" 'bbbbbbbbbbb1 bbbbbbbbbbb2'
+expect "snapshot: containers outside the stacks are ignored" "${C_STATE[ddddddddddd1]:-none}" '^none$'
+expect "snapshot: running + unhealthy -> unhealthy stack" "${STACK_STATUS[a]} ${STACK_UP[a]}/${STACK_TOTAL[a]} ${STACK_UNHEALTHY[a]}" '^unhealthy 2/2 1$'
+expect "snapshot: crashed service -> partial stack" "${STACK_STATUS[m]} ${STACK_UP[m]}/${STACK_TOTAL[m]}" '^partial 1/2$'
+expect "snapshot: exit 0 with restart no -> done" "${C_KIND[ccccccccccc1]}" '^done$'
+expect "snapshot: exit 1 -> down" "${C_KIND[bbbbbbbbbbb2]}" '^down$'
+expect "snapshot: only finished jobs -> stopped stack" "${STACK_STATUS[j]}" '^stopped$'
+expect "snapshot: no containers -> stopped stack" "${STACK_STATUS[e]} ${STACK_TOTAL[e]}" '^stopped 0$'
+expect "snapshot: started time parsed" "${C_STARTED[aaaaaaaaaaa1]}" '^1767225600$'
+expect "snapshot: shared network resolved to host" "${C_ID_BY_FULL[aaaaaaaaaaa1ffff]}" '^aaaaaaaaaaa1$'
+expect "snapshot: ports and networks" "${C_PORTS[aaaaaaaaaaa1]}|${C_NETS[aaaaaaaaaaa1]}" '^80/tcp -> 8080\|app_default=172.20.0.2$'
+stack_badge "$m"
+expect "badge: partial" "$REPLY" '^◐ 1/2 running$'
+container_summary aaaaaaaaaaa2 1767232800
+expect "summary: uptime, unhealthy and restarts" "$REPLY" '^2h 0m unhealthy ↻3$'
+container_summary aaaaaaaaaaa1 1767232800
+expect "summary: watchtower badge" "$REPLY" '\[auto\]$'
+unset -f docker
+
+# --------------------------------------------------------------------------
+echo "End-to-end (recorded docker output)"
+
+run() { # run <name> [args...]  -> $TMP/<name>.out / .err / .missing
+    local name="$1"; shift
+    ( cd "$ROOT/demo/stacks" &&
+      PATH="$ROOT/tests/bin:$PATH" DSM_FAKE_DOCKER=replay DSM_FAKE_MISSING="$TMP/$name.missing" \
+      "$SCRIPT" "$@" ) > "$TMP/$name.raw" 2> "$TMP/$name.err" < /dev/null
+    echo $? > "$TMP/$name.rc"
+    strip_ansi < "$TMP/$name.raw" > "$TMP/$name.out"
+}
+has() { grep -qF -- "$2" "$TMP/$1.out"; }
+clean_run() { # exit 0, nothing on stderr, every docker call had a fixture
+    local name="$1" problems=""
+    [[ "$(cat "$TMP/$name.rc")" == 0 ]] || problems+="exit code $(cat "$TMP/$name.rc")"$'\n'
+    [[ -s "$TMP/$name.err" ]] && problems+="stderr:"$'\n'"$(cat "$TMP/$name.err")"$'\n'
+    [[ -s "$TMP/$name.missing" ]] && problems+="unrecorded docker calls (re-run tests/record.sh):"$'\n'"$(cat "$TMP/$name.missing")"$'\n'
+    [[ -z "$problems" ]] && pass "$name: runs cleanly" || fail "$name: runs cleanly" "$problems"
+}
+
+run status
+clean_run status
+check "status: stopped stack" has status "✗ backup (stopped)"
+check "status: partial stack shows running/total" has status "⚠ monitoring (1/2 running)"
+check "status: stopped service shows Docker's status" grep -qE 'alerts ● Exited \(137\)' "$TMP/status.out"
+check "status: healthy stack counts only long-running services" has status "✓ web-app (3 containers)"
+check "status: finished one-shot job shown as done" grep -qE 'migrate ✓ done \(Exited \(0\)' "$TMP/status.out"
+check "status: last container uses └─" grep -qE '└─ worker ●' "$TMP/status.out"
+check "status: watchtower label shown" grep -qE 'frontend ● .*\[auto\]' "$TMP/status.out"
+check "status: summary counts" has status "Stacks: 3 total, 1 running, 1 with issues, 1 stopped"
+check "status: container counts" has status "Containers: 4 running, 0 unhealthy, 2 stopped"
+check "status: uptimes are sane" bash -c "! grep -E '[├└]─ [a-z-]+ ● [0-9]' '$TMP/status.out' | grep -vqE '● ([0-9]+d [0-9]+h|[0-9]+h [0-9]+m|[0-9]+m)( |$)'"
+check "status: no screen-clearing codes in plain output" bash -c "! grep -q \$'\033\\[2J' '$TMP/status.raw'"
+
+run verbose -v
+clean_run verbose
+check "verbose: CPU and memory from one docker stats call" grep -qE 'CPU: [0-9.]+%  MEM: [0-9.]+[KMG]iB' "$TMP/verbose.out"
+check "verbose: ports shown" has verbose "Ports: 8080/tcp -> 18080"
+check "verbose: image shown" has verbose "Image: busybox:1.36"
+check "verbose: volumes sorted largest first" \
+    bash -c "grep -A2 'Top 5 volumes' '$TMP/verbose.out' | tail -2 | awk '{print \$2}' | tr '\n' ' ' | grep -qx 'web-app_uploads web-app_cache '"
+
+run network -n
+clean_run network
+check "network: custom network listed" has network "web-app_app-net"
+check "network: container with IP" grep -qE 'web-app-frontend-1 \([0-9.]+\) \[web-app\]' "$TMP/network.out"
+check "network: shared-network container shown via its host" has network "web-app-sidecar-1 → via web-app-frontend-1 [web-app]"
+
+run help -h
+clean_run help
+check "help: lists interactive flag" has help "-I, --interactive"
+
+run version --version
+check "version: prints the script's version" grep -qE '^docker-stacks-manager [0-9]+\.[0-9]+\.[0-9]+$' "$TMP/version.out"
+
+run bad_dir -d /nonexistent/stacks
+check "--dir: missing directory is an error" grep -q "stacks directory not found: /nonexistent/stacks" "$TMP/bad_dir.err"
+
+run interactive -I
+check "interactive: refuses without a terminal" grep -q "needs a terminal" "$TMP/interactive.err"
+
+# --------------------------------------------------------------------------
+echo
+if [[ $failures -eq 0 ]]; then
+    echo "All tests passed"
+else
+    echo "$failures test(s) failed"
+    exit 1
+fi

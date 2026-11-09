@@ -1,0 +1,1 @@
+stacks | stats --no-stream --format {{.ID}}|{{.CPUPerc}}|{{.MemUsage}}

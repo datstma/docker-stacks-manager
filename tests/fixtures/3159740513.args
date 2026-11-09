@@ -1,0 +1,1 @@
+stacks | ps -a --filter label=com.docker.compose.project --format {{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.service"}}|{{.ID}}|{{.Names}}|{{.State}}|{{.Status}}

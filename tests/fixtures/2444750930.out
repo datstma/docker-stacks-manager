@@ -1,0 +1,7 @@
+4c7e9f1556fcfc096d0685055f2aa6e6dfb76664286c254dab56158017fb2324|0001-01-01T00:00:00Z|0|<no value>|busybox:1.36|backup_default|0|no||backup_default= 
+bcee850bb489a151f3a6b8805a910482bc533a6d05ad11c198ea9e74986b95e9|2026-11-08T16:19:16.824342705Z|0|<no value>|busybox:1.36|monitoring_default|137|unless-stopped||monitoring_default= 
+41cdc09999e2bc64ec93ba7fabe0effb669d67c34d8643c3bf7b6c6042115af1|2026-11-08T16:18:42.683925872Z|0|<no value>|busybox:1.36|monitoring_default|0|unless-stopped|8081/tcp -> 18081 |monitoring_default=192.168.0.2 
+8948cb6692065ac6fbdd91dd653e92bb3f1962db946d0623d7357c1782136984|2026-11-08T16:18:42.358118719Z|0|true|busybox:1.36|web-app_app-net|0|unless-stopped|8080/tcp -> 18080 |web-app_app-net=172.30.0.3 
+0ab778d33215e58b5c5357cfed74c2458be39661b63a28a96b11cfb36ee2053b|2026-11-08T16:19:16.639131174Z|0|<no value>|busybox:1.36|web-app_app-net|0|no||web-app_app-net= 
+db50b5601af1f72b00b5a24eefdc8257149fb829d69bc0c57c8c827cc2eb9967|2026-11-08T16:18:42.472053132Z|0|<no value>|busybox:1.36|container:8948cb6692065ac6fbdd91dd653e92bb3f1962db946d0623d7357c1782136984|0|unless-stopped||
+e433694c8913752aaf1c7590011cb0b5ac54c990a3789d1be71ee092831b87f4|2026-11-08T16:18:42.359156435Z|0|<no value>|busybox:1.36|web-app_app-net|0|unless-stopped||web-app_app-net=172.30.0.4 

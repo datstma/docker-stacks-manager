@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            experimental: false
+          # The script supports these, but CI coverage for them is new
+          - os: macos-latest
+            experimental: true
+          - os: windows-latest
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bash 4+ (macOS ships 3.2)
+        if: runner.os == 'macOS'
+        run: brew install bash
+
+      - name: Test suite
+        run: ./tests/run.sh
+
+      - name: Installer round trip
+        run: |
+          ./install.sh --prefix "$RUNNER_TEMP/dsm"
+          "$RUNNER_TEMP/dsm/bin/dsm" --version
+          "$RUNNER_TEMP/dsm/bin/dsm" --help > /dev/null
+          ./install.sh --prefix "$RUNNER_TEMP/dsm" --uninstall
+          test ! -e "$RUNNER_TEMP/dsm/bin/dsm"
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: make lint
+
+  version:
+    name: Version matches the changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          version=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' docker-stacks-manager.sh)
+          grep -q "^## \[$version\]" CHANGELOG.md ||
+            { echo "::error::VERSION $version has no entry in CHANGELOG.md"; exit 1; }

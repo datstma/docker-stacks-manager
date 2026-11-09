@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# Stand-in for the docker CLI used by tests/run.sh.
+#
+#   DSM_FAKE_DOCKER=replay  answer from tests/fixtures (no Docker needed)
+#   DSM_FAKE_DOCKER=record  call the real docker (DSM_REAL_DOCKER) and save the answer
+#
+# Each call is keyed on the current directory name plus the exact arguments,
+# because "docker compose ps" answers differently in each stack directory.
+
+FIXTURES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../fixtures" && pwd)"
+
+key=$( { printf '%s' "${PWD##*/}"; printf '\037%s' "$@"; } | cksum | awk '{print $1}')
+
+case "${DSM_FAKE_DOCKER:-replay}" in
+    record)
+        out="$FIXTURES/$key"
+        # Keep host-specific details (other networks, volumes, Watchtower) out of
+        # the fixtures: only the demo stacks' own objects are recorded.
+        case "$*" in
+            "ps --filter name=watchtower"*) : > "$out.out"; echo 0 > "$out.rc"; printf '%s\n' "$*" > "$out.args"; exit 0 ;;
+        esac
+        "$DSM_REAL_DOCKER" "$@" > "$out.out" 2>/dev/null
+        rc=$?
+        case "$*" in
+            "ps -a --filter label=com.docker.compose.project"*)
+                # Demo containers only, with the recording machine's path replaced
+                grep '/demo/stacks/' "$out.out" | sed 's#|[^|]*/demo/stacks/#|/recorded/demo/stacks/#' > "$out.tmp"
+                mv "$out.tmp" "$out.out" ;;
+            "stats --no-stream"*)
+                demo_ids=$("$DSM_REAL_DOCKER" ps -aq --filter label=com.docker.compose.project.working_dir 2>/dev/null |
+                    while read -r cid; do
+                        "$DSM_REAL_DOCKER" inspect -f '{{.Id}} {{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$cid"
+                    done | awk '/\/demo\/stacks\//{print substr($1, 1, 12)}')
+                grep -F "${demo_ids:-no-demo-containers}" "$out.out" > "$out.tmp"; mv "$out.tmp" "$out.out" ;;
+            "system df -v"*)
+                tr ';' '\n' < "$out.out" | grep -E '^(web-app_|monitoring_|backup_)' | tr '\n' ';' > "$out.tmp"; mv "$out.tmp" "$out.out" ;;
+        esac
+        echo "$rc" > "$out.rc"
+        printf '%s | %s\n' "${PWD##*/}" "$*" > "$out.args"
+        cat "$out.out"
+        exit "$rc"
+        ;;
+    replay)
+        if [[ -f "$FIXTURES/$key.out" ]]; then
+            cat "$FIXTURES/$key.out"
+            exit "$(cat "$FIXTURES/$key.rc")"
+        fi
+        printf 'fake docker: no fixture for: (%s) %s\n' "${PWD##*/}" "$*" >> "${DSM_FAKE_MISSING:-/dev/stderr}"
+        exit 1
+        ;;
+esac

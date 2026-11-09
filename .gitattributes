@@ -1,0 +1,9 @@
+*.sh text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.tape text eol=lf
+Makefile text eol=lf
+tests/bin/* text eol=lf
+tests/fixtures/** -text
+*.png binary
+*.gif binary

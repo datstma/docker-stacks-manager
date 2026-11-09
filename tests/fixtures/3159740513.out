@@ -1,0 +1,7 @@
+backup|/recorded/demo/stacks/backup|nightly|4c7e9f1556fc|backup-nightly-1|created|Created
+monitoring|/recorded/demo/stacks/monitoring|status-page|41cdc09999e2|monitoring-status-page-1|running|Up 38 seconds
+monitoring|/recorded/demo/stacks/monitoring|alerts|bcee850bb489|monitoring-alerts-1|exited|Exited (137) 3 seconds ago
+web-app|/recorded/demo/stacks/web-app|sidecar|db50b5601af1|web-app-sidecar-1|running|Up 38 seconds
+web-app|/recorded/demo/stacks/web-app|migrate|0ab778d33215|web-app-migrate-1|exited|Exited (0) 4 seconds ago
+web-app|/recorded/demo/stacks/web-app|frontend|8948cb669206|web-app-frontend-1|running|Up 38 seconds (healthy)
+web-app|/recorded/demo/stacks/web-app|worker|e433694c8913|web-app-worker-1|running|Up 38 seconds

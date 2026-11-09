@@ -1,0 +1,2 @@
+monitoring_default|bridge|192.168.0.0/20
+web-app_app-net|bridge|172.30.0.0/16
