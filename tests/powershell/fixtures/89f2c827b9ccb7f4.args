@@ -1,0 +1,1 @@
+stacks | ps --filter name=watchtower --format {{.ID}}

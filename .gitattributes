@@ -7,3 +7,6 @@ tests/bin/* text eol=lf
 tests/fixtures/** -text
 *.png binary
 *.gif binary
+*.ps1 text eol=lf
+*.psd1 text eol=lf
+tests/powershell/fixtures/** -text

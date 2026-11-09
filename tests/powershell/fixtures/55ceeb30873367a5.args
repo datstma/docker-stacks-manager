@@ -1,0 +1,1 @@
+stacks | ps -a --filter label=com.docker.compose.project --format [{{json .ID}},{{json .Status}}]

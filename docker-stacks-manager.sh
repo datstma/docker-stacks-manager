@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Docker Stack Manager - Interactive TUI for Docker Compose stacks
-# Runs on Linux, macOS (with bash 4+ from Homebrew) and Windows (WSL2, or Git Bash)
+# Runs on Linux, macOS (with bash 4+ from Homebrew) and Windows under WSL2.
+# On Windows itself, use the PowerShell edition: docker-stacks-manager.ps1
 #
 # Requirements:
 #   - bash 4.0+ (for associative arrays)
@@ -12,7 +13,7 @@
 
 set -o pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 DSM_REPO="datstma/docker-stacks-manager"
 
 # Base directory holding the stacks: -d/--dir, else $DSM_DIR, else the
@@ -86,7 +87,7 @@ calc_int() {
 # Works on both GNU and BSD date
 date_to_epoch() {
     local datestr="$1"
-    # Try GNU date first (Linux, WSL, Git Bash)
+    # Try GNU date first (Linux, WSL)
     date -d "$datestr" +%s 2>/dev/null && return
     # BSD/macOS date: drop fractional seconds and the trailing Z, parse as UTC
     local trimmed="${datestr%%.*}"
@@ -126,16 +127,6 @@ find_compose_files() {
         sort
 }
 
-# Run docker with a TTY attached (docker exec -it ...).
-# Git Bash's mintty terminal isn't a real Windows console, so docker can't
-# attach to it without winpty. Windows Terminal (WT_SESSION) doesn't need it.
-docker_tty() {
-    if [[ -n "${MSYSTEM:-}" && -z "${WT_SESSION:-}" ]] && command -v winpty &>/dev/null; then
-        winpty docker "$@"
-    else
-        docker "$@"
-    fi
-}
 
 # Wait for any key press (not just Enter)
 press_any_key() {
@@ -937,14 +928,14 @@ container_action_menu() {
                 view_start
                 echo -e "${BOLD}${CYAN}=== Interactive Shell (bash): $service ===${NC}"
                 echo -e "${YELLOW}Type 'exit' or press Ctrl+D to close shell${NC}\n"
-                docker_tty exec -it "$container_id" bash 2>/dev/null || echo -e "${RED}Bash not available${NC}"
+                docker exec -it "$container_id" bash 2>/dev/null || echo -e "${RED}Bash not available${NC}"
                 press_any_key
                 ;;
             7)
                 view_start
                 echo -e "${BOLD}${CYAN}=== Interactive Shell (sh): $service ===${NC}"
                 echo -e "${YELLOW}Type 'exit' or press Ctrl+D to close shell${NC}\n"
-                docker_tty exec -it "$container_id" sh 2>/dev/null || echo -e "${RED}Shell not available${NC}"
+                docker exec -it "$container_id" sh 2>/dev/null || echo -e "${RED}Shell not available${NC}"
                 press_any_key
                 ;;
             8) container_top "$container_id" "$service" ;;

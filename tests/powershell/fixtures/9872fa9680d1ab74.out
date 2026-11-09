@@ -1,0 +1,2 @@
+["monitoring_default","bridge",[{"Subnet":"172.21.0.0/16","Gateway":"172.21.0.1"}]]
+["web-app_app-net","bridge",[{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"}]]

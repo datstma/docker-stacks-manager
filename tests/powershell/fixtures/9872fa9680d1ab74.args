@@ -1,0 +1,1 @@
+stacks | network inspect --format [{{json .Name}},{{json .Driver}},{{json .IPAM.Config}}] monitoring_default web-app_app-net

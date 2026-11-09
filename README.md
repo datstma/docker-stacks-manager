@@ -2,13 +2,14 @@
 
 <p align="center">
   <strong>See and control every Docker Compose stack on a host from one terminal UI.</strong><br>
-  A single Bash script. No daemon, no web server, no database.
+  One script: Bash for Linux and macOS, native PowerShell for Windows. No daemon, no web server, no database.
 </p>
 
 <p align="center">
   <a href="https://github.com/datstma/docker-stacks-manager/actions/workflows/ci.yml"><img src="https://github.com/datstma/docker-stacks-manager/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/datstma/docker-stacks-manager/releases/latest"><img src="https://img.shields.io/github/v/release/datstma/docker-stacks-manager?sort=semver" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/bash-4.0+-4EAA25?logo=gnubash&logoColor=white" alt="Bash 4.0+">
+  <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1 | 7">
   <img src="https://img.shields.io/badge/docker-compose%20v2-2496ED?logo=docker&logoColor=white" alt="Docker Compose v2">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey" alt="Linux | macOS | Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
@@ -18,6 +19,7 @@
   <a href="#-install">Install</a> •
   <a href="#-usage">Usage</a> •
   <a href="#-interactive-mode">Interactive mode</a> •
+  <a href="#-windows-powershell">Windows</a> •
   <a href="#-updating">Updating</a> •
   <a href="#-faq--troubleshooting">FAQ</a> •
   <a href="#-contributing">Contributing</a>
@@ -48,8 +50,9 @@ or Portainer's stack view, but in your terminal, with vim keys.
   network (an app routed through a VPN container, a sidecar)
 - **Watchtower aware**: when Watchtower last ran, what it updated or couldn't check, when it
   runs next, and which containers have opted in to auto-updates (`[auto]`)
-- **Runs anywhere Bash does**: Linux, macOS, Windows (WSL2 or Git Bash). Needs bash 4+, Docker
-  and the Compose v2 plugin, nothing else
+- **Linux, macOS and Windows**: a Bash script for Linux, macOS and WSL2, and a native
+  [PowerShell edition](#-windows-powershell) for Windows with Docker Desktop. Same views, same
+  keys. Nothing to install besides Docker
 
 ## 📸 Screenshots
 
@@ -77,7 +80,7 @@ recorded with [`demo/screenshots/screenshots.sh`](demo/screenshots/screenshots.s
 
 ## 🚀 Install
 
-**One line** (Linux, macOS, WSL2, Git Bash):
+**Linux, macOS, WSL2** (one line):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/datstma/docker-stacks-manager/main/install.sh | bash
@@ -130,14 +133,25 @@ chmod +x ~/.local/bin/dsm
 ```
 </details>
 
+**Windows** (PowerShell, one line):
+
+```powershell
+irm https://raw.githubusercontent.com/datstma/docker-stacks-manager/main/install.ps1 | iex
+```
+
+This installs the PowerShell edition and a `dsm` command into
+`%LOCALAPPDATA%\Programs\docker-stacks-manager` and adds it to your user `PATH`. Open a new
+terminal and run `dsm`. More in [Windows (PowerShell)](#-windows-powershell).
+
 ### Requirements
 
 | | |
 |---|---|
 | **Bash** | 4.0 or newer. macOS ships 3.2: `brew install bash` |
+| **PowerShell** (Windows) | Windows PowerShell 5.1, which every Windows 10/11 has, or PowerShell 7+ |
 | **Docker** | With the Compose v2 plugin (`docker compose`). The old standalone `docker-compose` v1 is not supported |
 | **Tools** | `awk`, `sed`, `grep`, `find`, `sort` and friends, present on any normal system. `bc` is optional |
-| **Install/update** | `curl` or `wget` |
+| **Install/update** | `curl` or `wget` (Linux/macOS); nothing extra on Windows |
 
 ## 📖 Usage
 
@@ -237,6 +251,52 @@ start, a shell (`bash` or `sh`), `top` and live stats.
 | `↻N` | Restarted N times: probably crash-looping |
 | `[auto]` | Opted in to Watchtower auto-updates |
 
+## 🪟 Windows (PowerShell)
+
+On Windows, dsm is a native PowerShell script: no WSL, Git Bash or Cygwin needed, just Docker
+Desktop. It works in Windows Terminal and the classic console, with Windows PowerShell 5.1 or
+PowerShell 7 (it uses 7 when it's installed).
+
+Everything above applies; the options are PowerShell parameters. The short Bash-style aliases
+work too, so `dsm -I` and `dsm -v` do what you'd expect:
+
+| PowerShell | Alias | Bash |
+|---|---|---|
+| `-Interactive` | `-I` | `-I`, `--interactive` |
+| `-Detailed` | `-v` | `-v`, `--verbose` |
+| `-Stats` / `-Ports` / `-Images` | `-s` / `-p` | `-s` / `-p` / `-i` |
+| `-Watch` | `-w` | `-w` |
+| `-Network` | `-n` | `-n` |
+| `-Dir C:\docker-stacks` | `-d` | `-d DIR` |
+| `-Update` | `-U` | `-U`, `--update` |
+| `-Version` | | `-V`, `--version` |
+
+```powershell
+cd C:\docker-stacks; dsm -Interactive
+dsm -Dir C:\docker-stacks -Detailed
+$env:DSM_DIR = 'C:\docker-stacks'     # or set it permanently in your profile
+dsm -Help                              # all options
+```
+
+In the TUI, `q`, `Esc` or `Ctrl+C` leave a live view (logs, stats, traffic) and take you back to
+the menu. The filter (`/`) narrows the list as you type.
+
+<details>
+<summary><strong>How the Windows install works</strong></summary>
+
+- The script goes into `%LOCALAPPDATA%\Programs\docker-stacks-manager`, next to a `dsm.cmd`
+  launcher. The launcher runs PowerShell 7 if you have it, otherwise Windows PowerShell 5.1,
+  with `-ExecutionPolicy Bypass` for this one script, so your execution policy stays as it is
+- That folder is added to your user `PATH`; terminals opened afterwards find `dsm`
+- Installer options go through a script block:
+  ```powershell
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/datstma/docker-stacks-manager/main/install.ps1))) -Ref v1.1.0
+  ```
+  `-Ref` picks a release or branch, `-Destination` another folder, `-Uninstall` removes it
+  (folder and `PATH` entry)
+- From a clone: `.\install.ps1`, or run `.\docker-stacks-manager.ps1` directly
+</details>
+
 ## 🔄 Updating
 
 ```bash
@@ -250,10 +310,17 @@ version, use `DSM_UPDATE_REF=v1.0.0 dsm --update` or the installer's `--ref`.
 
 If the script lives somewhere only root can write (`/usr/local/bin`), use `sudo dsm --update`.
 
+On Windows, `dsm -Update` does the same for the PowerShell edition, and running the
+`irm … | iex` line again also updates.
+
 To uninstall:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/datstma/docker-stacks-manager/main/install.sh | bash -s -- --uninstall
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/datstma/docker-stacks-manager/main/install.ps1))) -Uninstall
 ```
 
 ## 🧪 Try it on the demo stacks
@@ -269,16 +336,19 @@ git clone https://github.com/datstma/docker-stacks-manager.git && cd docker-stac
 ./demo/demo.sh down     # remove them again
 ```
 
+On Windows: `.\demo\demo.ps1 up`, `.\demo\demo.ps1 run -Interactive`, `.\demo\demo.ps1 down`.
+
 ## 🖥️ Platforms
 
 | Platform | Notes |
 |---|---|
 | **Linux** | Any distro with bash 4+ (Alpine: `apk add bash`). Used daily on Debian |
 | **macOS** | Docker Desktop, OrbStack or Colima, plus `brew install bash`. Run it as `dsm` or `./docker-stacks-manager.sh`, not `bash docker-stacks-manager.sh`, so it picks up Homebrew's bash rather than `/bin/bash` 3.2 |
-| **Windows, WSL2** | Recommended. With Docker Desktop's WSL integration it behaves exactly like Linux |
-| **Windows, Git Bash** | Best effort, with Docker Desktop. Container shells use `winpty` automatically in mintty |
+| **Windows** | The [PowerShell edition](#-windows-powershell) with Docker Desktop, on Windows PowerShell 5.1 or PowerShell 7 |
+| **Windows, WSL2** | The Bash script, inside a WSL2 distro with Docker Desktop's WSL integration. Behaves exactly like Linux |
 
-CI runs the test suite on Linux, macOS and Windows (Git Bash) on every push.
+CI runs the Bash tests on Linux and macOS, and the PowerShell tests on Windows under both
+PowerShell 5.1 and 7, on every push.
 
 ## ❓ FAQ & troubleshooting
 
@@ -306,10 +376,26 @@ macOS ships bash 3.2. `brew install bash`, then run `dsm` directly (not `bash ds
 </details>
 
 <details>
-<summary><strong>Windows: <code>$'\r': command not found</code></strong></summary>
+<summary><strong>Windows: symbols show as <code>?</code> or boxes</strong></summary>
 
-The script was saved with Windows line endings. The repository's `.gitattributes` prevents this
-for fresh clones and the installer downloads it as-is; to fix an existing copy:
+The classic console's default font lacks some symbols. Windows Terminal (the default on Windows
+11) shows them all; in the classic console, pick a font such as Cascadia Mono. The emoji in the
+network view need Windows Terminal.
+</details>
+
+<details>
+<summary><strong>Windows: "running scripts is disabled on this system"</strong></summary>
+
+You ran the `.ps1` directly under a restrictive execution policy. Use the `dsm` command the
+installer sets up (it bypasses the policy for this script only), or allow local scripts for your
+account: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+</details>
+
+<details>
+<summary><strong>WSL2: <code>$'\r': command not found</code></strong></summary>
+
+The Bash script was saved with Windows line endings. The repository's `.gitattributes` prevents
+this for fresh clones and the installer downloads it as-is; to fix an existing copy:
 `sed -i 's/\r$//' docker-stacks-manager.sh`.
 </details>
 
@@ -342,20 +428,36 @@ the latest release when you run it.
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. The whole tool is [one Bash script](docker-stacks-manager.sh),
-and it has to keep working with both GNU and BSD tools (Linux and macOS), so:
+Issues and pull requests are welcome. The tool is two single-file editions that behave the same:
+[docker-stacks-manager.sh](docker-stacks-manager.sh) (Bash) and
+[docker-stacks-manager.ps1](docker-stacks-manager.ps1) (PowerShell). A change to one usually
+belongs in the other too.
 
 ```bash
-./tests/run.sh          # the test suite: no Docker needed, it replays recorded docker output
+./tests/run.sh          # Bash tests: no Docker needed, they replay recorded docker output
 make lint               # shellcheck (errors only), if you have shellcheck installed
 ./tests/record.sh       # re-record the fixtures when you change which docker commands are called
 ```
+
+```powershell
+Invoke-Pester ./tests/powershell     # PowerShell tests (Pester 5+), also without Docker
+./tests/powershell/record.ps1        # re-record their fixtures (needs Docker Desktop)
+```
+
+For the Bash script:
 
 - Avoid GNU-only flags: no `sed -r`, `grep "a\|b"` (use `grep -E`), `sort -h`, `readlink -f`, or
   `date -d` without a BSD fallback
 - New views read the snapshot (`load_snapshot`) rather than calling `docker` per stack or per
   container: that's what keeps it fast
-- On macOS or Windows? Running `./tests/run.sh` and reporting the result is a real help
+- On macOS? Running `./tests/run.sh` and reporting the result is a real help
+
+For the PowerShell script:
+
+- It has to run on Windows PowerShell 5.1: no `??`, `?.`, ternaries or `&&`, and `.ps1` files are
+  saved as UTF-8 **with BOM** (CI checks both editions agree on the version, and the BOM)
+- docker output is read as JSON (`--format '[{{json .A}},{{json .B}}]'`), with no double quotes
+  in templates: 5.1 mangles quotes in arguments to native programs
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed between releases.
 

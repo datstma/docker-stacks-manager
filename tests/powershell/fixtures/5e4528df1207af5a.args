@@ -1,0 +1,1 @@
+stacks | inspect --format [{{json .Id}},{{json .Name}},{{json .Config.Labels}},{{json .Config.Image}},{{json .State}},{{json .RestartCount}},{{json .HostConfig.NetworkMode}},{{json .HostConfig.RestartPolicy.Name}},{{json .NetworkSettings.Ports}},{{json .NetworkSettings.Networks}}] 039c556043b5 2753cf9144bd 34ff554df31e 3c2b80ec0fb9 45c230a78517 6b9c0f3ee6a4 e2987eb9cabf

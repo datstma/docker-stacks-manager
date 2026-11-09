@@ -1,0 +1,1 @@
+stacks | system df -v --format {{json .Volumes}}

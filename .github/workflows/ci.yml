@@ -6,26 +6,15 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: Tests (${{ matrix.os }})
+  bash:
+    name: Bash (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            experimental: false
-          # The script supports these, but CI coverage for them is new
-          - os: macos-latest
-            experimental: true
-          - os: windows-latest
-            experimental: true
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
-    defaults:
-      run:
-        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install bash 4+ (macOS ships 3.2)
         if: runner.os == 'macOS'
@@ -42,19 +31,83 @@ jobs:
           ./install.sh --prefix "$RUNNER_TEMP/dsm" --uninstall
           test ! -e "$RUNNER_TEMP/dsm/bin/dsm"
 
+  powershell:
+    name: PowerShell ${{ matrix.edition }} (Windows)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - edition: '7'
+            shell: pwsh
+          - edition: '5.1'
+            shell: powershell
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Pester 5
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Pester tests
+        run: |
+          Import-Module Pester -MinimumVersion 5.5
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tests/powershell'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+      - name: Installer round trip
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'dsm'
+          ./install.ps1 -Destination $dest
+          & "$dest\dsm.cmd" -Version
+          if ($LASTEXITCODE -ne 0) { throw "dsm.cmd -Version failed" }
+          ./install.ps1 -Destination $dest -Uninstall
+          if (Test-Path $dest) { throw "uninstall left $dest behind" }
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: shellcheck
+      - uses: actions/checkout@v5
+      - name: shellcheck (errors only)
         run: make lint
 
-  version:
-    name: Version matches the changelog
-    runs-on: ubuntu-latest
+  powershell-lint:
+    name: PowerShell lint
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: |
-          version=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' docker-stacks-manager.sh)
-          grep -q "^## \[$version\]" CHANGELOG.md ||
-            { echo "::error::VERSION $version has no entry in CHANGELOG.md"; exit 1; }
+      - uses: actions/checkout@v5
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $files = 'docker-stacks-manager.ps1', 'install.ps1', 'demo/demo.ps1', 'tests/powershell/record.ps1', 'tests/powershell/bin/docker.ps1'
+          $found = $files | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Settings ./PSScriptAnalyzerSettings.psd1 }
+          $found | Format-Table ScriptName, Line, RuleName, Message -AutoSize -Wrap
+          if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
+
+      - name: PowerShell files are UTF-8 with BOM (Windows PowerShell 5.1 needs it)
+        shell: pwsh
+        run: |
+          $bad = Get-ChildItem -Recurse -Include *.ps1, *.psd1 | Where-Object {
+            $b = [IO.File]::ReadAllBytes($_.FullName)
+            -not ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+          }
+          if ($bad) { $bad.FullName; throw 'These files need a UTF-8 BOM' }
+
+      - name: Both editions and the changelog agree on the version
+        shell: bash
+        run: |
+          sh_version=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' docker-stacks-manager.sh)
+          ps_version=$(sed -n "s/^\$script:DsmVersion = '\(.*\)'.*/\1/p" docker-stacks-manager.ps1)
+          echo "bash: $sh_version  powershell: $ps_version"
+          [ "$sh_version" = "$ps_version" ] || { echo "::error::Versions differ: bash $sh_version, PowerShell $ps_version"; exit 1; }
+          grep -q "^## \[$sh_version\]" CHANGELOG.md ||
+            { echo "::error::VERSION $sh_version has no entry in CHANGELOG.md"; exit 1; }

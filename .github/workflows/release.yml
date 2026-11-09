@@ -1,7 +1,8 @@
 name: Release
 
-# Push a tag like v1.2.3 (matching VERSION in docker-stacks-manager.sh) to
-# publish a GitHub release. `dsm --update` and install.sh install the latest one.
+# Push a tag like v1.2.3 (matching the version in docker-stacks-manager.sh and
+# docker-stacks-manager.ps1) to publish a GitHub release. `dsm --update`,
+# `dsm -Update`, install.sh and install.ps1 install the latest one.
 on:
   push:
     tags: ['v*']
@@ -13,13 +14,14 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Check the tag matches the script's VERSION
+      - name: Check the tag matches both editions' version
         run: |
           version=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' docker-stacks-manager.sh)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION=$version"
+          ps_version=$(sed -n "s/^\$script:DsmVersion = '\(.*\)'.*/\1/p" docker-stacks-manager.ps1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ] || [ "$ps_version" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION=$version / DsmVersion=$ps_version"
             exit 1
           fi
 
@@ -44,4 +46,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file notes.md \
-            docker-stacks-manager.sh install.sh
+            docker-stacks-manager.sh install.sh docker-stacks-manager.ps1 install.ps1
