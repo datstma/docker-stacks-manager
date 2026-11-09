@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [1.2.0] - unreleased
+## [1.2.0] - 2026-11-09
 
 ### Added
 - Import: turn a container started with `docker run`, or a `docker run`
@@ -62,5 +62,6 @@ First public release.
 - Runs on Linux, macOS (bash 4+ from Homebrew) and Windows (WSL2, Git Bash);
   test suite runs without Docker
 
+[1.2.0]: https://github.com/datstma/docker-stacks-manager/releases/tag/v1.2.0
 [1.1.0]: https://github.com/datstma/docker-stacks-manager/releases/tag/v1.1.0
 [1.0.0]: https://github.com/datstma/docker-stacks-manager/releases/tag/v1.0.0
