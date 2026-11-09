@@ -1326,10 +1326,12 @@ function Start-Watch {
 # Self-update (-Update)
 # ============================================================================
 
+# Download as UTF-8 whatever the server says (5.1 may guess another encoding)
 function Get-RemoteText([string]$Url) {
     $params = @{ Uri = $Url; ErrorAction = 'Stop' }
     if ($PSVersionTable.PSVersion.Major -lt 6) { $params.UseBasicParsing = $true }
-    return (Invoke-WebRequest @params).Content
+    $bytes = (Invoke-WebRequest @params).RawContentStream.ToArray()
+    return [Text.Encoding]::UTF8.GetString($bytes)
 }
 
 # Replace this script with the latest release (or $env:DSM_UPDATE_REF: a tag
@@ -1360,7 +1362,6 @@ function Update-Self {
         [Console]::Error.WriteLine("Error: could not download $url ($($_.Exception.Message))")
         return 1
     }
-    if ($text -is [byte[]]) { $text = [Text.Encoding]::UTF8.GetString($text) }
     $text = $text.TrimStart([char]0xFEFF)
 
     $tokens = $null; $errors = $null

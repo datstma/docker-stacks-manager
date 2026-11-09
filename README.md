@@ -454,8 +454,10 @@ For the Bash script:
 
 For the PowerShell script:
 
-- It has to run on Windows PowerShell 5.1: no `??`, `?.`, ternaries or `&&`, and `.ps1` files are
-  saved as UTF-8 **with BOM** (CI checks both editions agree on the version, and the BOM)
+- It has to run on Windows PowerShell 5.1: no `??`, `?.`, ternaries or `&&`. `.ps1` files with
+  non-ASCII text are saved as UTF-8 **with BOM**, except `install.ps1`, which must stay plain
+  ASCII without one because it runs through `irm | iex` (CI checks this, and that both editions
+  agree on the version)
 - docker output is read as JSON (`--format '[{{json .A}},{{json .B}}]'`), with no double quotes
   in templates: 5.1 mangles quotes in arguments to native programs
 

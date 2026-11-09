@@ -1,6 +1,9 @@
-﻿<#
+<#
 .SYNOPSIS
     Install, update or uninstall Docker Stack Manager on Windows.
+
+    This file is plain ASCII without a byte order mark on purpose: it runs
+    through `irm | iex`, and Windows PowerShell 5.1 mis-decodes a BOM there.
 
 .DESCRIPTION
     One line, in PowerShell:
@@ -74,12 +77,12 @@ param(
 
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 
+    # Download as UTF-8 whatever the server says (5.1 may guess another encoding)
     function Get-RemoteText([string]$Url) {
         $params = @{ Uri = $Url }
         if ($PSVersionTable.PSVersion.Major -lt 6) { $params.UseBasicParsing = $true }
-        $content = (Invoke-WebRequest @params).Content
-        if ($content -is [byte[]]) { $content = [Text.Encoding]::UTF8.GetString($content) }
-        return $content.TrimStart([char]0xFEFF)
+        $bytes = (Invoke-WebRequest @params).RawContentStream.ToArray()
+        return [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
     }
 
     # A clone's own script, or a download

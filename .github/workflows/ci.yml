@@ -102,14 +102,20 @@ jobs:
           $found | Format-Table ScriptName, Line, RuleName, Message -AutoSize -Wrap
           if ($found) { throw "PSScriptAnalyzer: $(@($found).Count) finding(s)" }
 
-      - name: PowerShell files are UTF-8 with BOM (Windows PowerShell 5.1 needs it)
+      - name: PowerShell encodings (BOM where 5.1 needs it, none in install.ps1)
         shell: pwsh
         run: |
-          $bad = Get-ChildItem -Recurse -Include *.ps1, *.psd1 | Where-Object {
-            $b = [IO.File]::ReadAllBytes($_.FullName)
-            -not ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+          # Windows PowerShell 5.1 reads BOM-less files as ANSI, so any file with
+          # non-ASCII text needs a UTF-8 BOM. install.ps1 runs through irm | iex,
+          # where 5.1 mis-decodes a BOM: it must be plain ASCII without one.
+          $problems = foreach ($f in Get-ChildItem -Recurse -Include *.ps1, *.psd1) {
+            $b = [IO.File]::ReadAllBytes($f.FullName)
+            $bom = $b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF
+            $ascii = -not ($b | Where-Object { $_ -gt 127 })
+            if ($f.Name -eq 'install.ps1') { if (-not $ascii) { "$($f.FullName): must be plain ASCII without a BOM" } }
+            elseif (-not $bom -and -not $ascii) { "$($f.FullName): needs a UTF-8 BOM" }
           }
-          if ($bad) { $bad.FullName; throw 'These files need a UTF-8 BOM' }
+          if ($problems) { $problems; throw 'Encoding problems' }
 
       - name: Both editions and the changelog agree on the version
         shell: bash
