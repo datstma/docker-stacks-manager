@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The Watchtower next check could show a daily schedule one minute early (03:59 for 04:00) when a second ticked over while it was worked out.
+
 ## [1.2.0] - 2026-11-09
 
 ### Added

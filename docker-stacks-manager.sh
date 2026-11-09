@@ -470,8 +470,9 @@ watchtower_next_check() {
         if [[ "$sec" =~ ^[0-9]+$ && "$min" =~ ^[0-9]+$ && "$hour" =~ ^[0-9]+$ &&
               "$dom" =~ ^[*?]$ && "$mon" =~ ^[*?]$ && "$dow" =~ ^[*?]$ && -z "$extra" ]]; then
             local clock h m s delta
-            clock=$(TZ="${tz:-${TZ:-}}" date '+%H %M %S')
-            read -r h m s <<< "$clock"
+            # Epoch and clock from one call, so a second ticking over between two can't skew it
+            clock=$(TZ="${tz:-${TZ:-}}" date '+%s %H %M %S')
+            read -r now h m s <<< "$clock"
             delta=$(( (10#$hour * 3600 + 10#$min * 60 + 10#$sec) - (10#$h * 3600 + 10#$m * 60 + 10#$s) ))
             [ "$delta" -le 0 ] && delta=$((delta + 86400))
             echo "$(TZ="${tz:-${TZ:-}}" epoch_to_local $((now + delta)) zone) (daily)"
