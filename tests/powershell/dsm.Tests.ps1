@@ -197,6 +197,110 @@ Describe 'Get-Snapshot' {
     }
 }
 
+Describe 'Import: docker run commands' {
+    BeforeAll {
+        function Get-Yaml([string]$Command) {
+            ConvertFrom-RunCommand $Command
+            return ((ConvertTo-ComposeYaml) -join "`n")
+        }
+    }
+    It 'splits words like a POSIX shell, keeping Windows paths' {
+        $w = Split-ShellWords "docker run -e `"A=b c`" -e 'D=`$E' \`n  --name x\ y -v C:\data:/d img # comment"
+        ($w | ForEach-Object { "[$_]" }) -join '' | Should -Be '[docker][run][-e][A=b c][-e][D=$E][--name][x y][-v][C:\data:/d][img]'
+    }
+    It 'follows PowerShell and cmd line continuations' {
+        (Split-ShellWords "docker run ```n -d img").Count | Should -Be 4
+        (Split-ShellWords "docker run ^`r`n -d img").Count | Should -Be 4
+    }
+    It 'rejects an unclosed quote' {
+        { Split-ShellWords 'docker run "oops' } | Should -Throw '*unclosed quote*'
+    }
+    It 'converts a full command' {
+        $y = Get-Yaml 'sudo docker run -dit --name=Web_1 --restart unless-stopped -p 8080:80 -p127.0.0.1:8443:443 -v /srv/html:/usr/share/nginx/html:ro -v cache:/var/cache --mount type=tmpfs,target=/tmp,tmpfs-size=64m -e TZ=Europe/Stockholm --env "MSG=hello \"world\"" --network proxy --ip 172.20.0.5 --network-alias www --ulimit nofile=1024:2048 --health-cmd "curl -f http://localhost || exit 1" --gpus all --rm nginx:1.27 nginx -g "daemon off;" | tee log'
+        $y | Should -Match '(?m)^  web_1:$'
+        $y | Should -Match 'container_name: "Web_1"'
+        $y | Should -Match ([regex]::Escape('command: ["nginx", "-g", "daemon off;"]'))
+        $y | Should -Match '- "8080:80"'
+        $y | Should -Match '- "127\.0\.0\.1:8443:443"'
+        $y | Should -Match ([regex]::Escape('- "MSG=hello \"world\""'))
+        $y | Should -Match '(?m)^  "cache":\n    external: true'
+        $y | Should -Match '- "/tmp:size=64m"'
+        $y | Should -Match 'ipv4_address: "172\.20\.0\.5"'
+        $y | Should -Match ([regex]::Escape('aliases: ["www"]'))
+        $y | Should -Match 'tty: true'
+        $y | Should -Match 'stdin_open: true'
+        $y | Should -Match 'hard: 2048'
+        $y | Should -Match ([regex]::Escape('test: ["CMD-SHELL", "curl -f http://localhost || exit 1"]'))
+        $y | Should -Match 'count: all'
+        $y | Should -Match '#   - --rm has no compose equivalent'
+        $y | Should -Match 'Stopped at "\|"'
+    }
+    It 'leaves $VARIABLES for compose and says so' {
+        $y = Get-Yaml 'docker run -e PASS=$SECRET alpine'
+        $y | Should -Match ([regex]::Escape('- "PASS=$SECRET"'))
+        $y | Should -Match 'Compose fills in'
+        $y | Should -Match '(?m)^  alpine:$'
+    }
+    It 'refuses what is not a docker run command' {
+        { ConvertFrom-RunCommand 'docker ps -a' } | Should -Throw 'not a docker run command'
+        { ConvertFrom-RunCommand 'docker run -d -p 80:80' } | Should -Throw 'no image in the command'
+    }
+}
+
+Describe 'Import: containers' {
+    BeforeAll {
+        $script:ImportDir = Join-Path $Root 'tests/import'
+        Mock Invoke-Docker {
+            $flat = @($args | ForEach-Object { $_ })
+            if ($flat[0] -eq 'inspect' -and $flat[1] -eq '--type') {
+                $f = Join-Path $script:ImportDir "$($flat[-1]).json"
+                if (Test-Path $f) { Get-Content -Raw $f }
+            } elseif ($flat[0] -eq 'image' -and $flat[1] -eq 'inspect') {
+                foreach ($f in Get-ChildItem $script:ImportDir -Filter '*.image.json') {
+                    $text = Get-Content -Raw $f.FullName
+                    if ($text.Contains($flat[-1])) { return $text }
+                }
+            }
+        }
+        function Get-ImportYaml([string]$Name) {
+            ConvertFrom-Container $Name
+            return ((ConvertTo-ComposeYaml) -join "`n")
+        }
+    }
+    It 'keeps what was set with docker run and leaves out image defaults' {
+        $y = Get-ImportYaml 'web'
+        $y | Should -Not -Match 'PATH=|maintainer'
+        $y | Should -Match ([regex]::Escape('- "PRICE=$$5"'))
+        $y | Should -Match 'restart: "unless-stopped"'
+        $y | Should -Match '- "127\.0\.0\.1:8443:443"'
+        $y | Should -Match '(?m)^  "webdata":\n    external: true'
+        $y | Should -Match '- "/srv/html:/srv:ro"'
+        $y | Should -Match 'ipv4_address: "172\.30\.0\.50"'
+        $y | Should -Match ([regex]::Escape('aliases: ["www"]'))
+        $y | Should -Match 'mem_limit: "256m"'
+        $y | Should -Match '(?m)^    cpus: 0\.5$'
+        $y | Should -Match 'interval: "30s"'
+        $y | Should -Match 'com\.centurylinklabs\.watchtower\.enable=true'
+        $y | Should -Not -Match 'hostname:'
+    }
+    It 'keeps entrypoint and command together' {
+        $y = Get-ImportYaml 'job'
+        $y | Should -Match ([regex]::Escape('entrypoint: ["sh"]'))
+        $y | Should -Match ([regex]::Escape('command: ["-c", "echo hi > /data/x; sleep 3600"]'))
+    }
+    It 'keeps an anonymous volume by its ID' {
+        $y = Get-ImportYaml 'anon'
+        $y | Should -Match '- "[0-9a-f]{64}:/data"'
+        $y | Should -Match 'anonymous volume at /data'
+    }
+    It 'refuses a container compose already manages' {
+        { ConvertFrom-Container 'managed' } | Should -Throw '*already part of the compose stack conv1'
+    }
+    It 'reports a missing container' {
+        { ConvertFrom-Container 'nosuch' } | Should -Throw 'no such container: nosuch'
+    }
+}
+
 Describe 'End to end (recorded docker output) under <_>' -ForEach $Shells {
     BeforeAll {
         $Shell = $_
@@ -245,6 +349,15 @@ Describe 'End to end (recorded docker output) under <_>' -ForEach $Shells {
             $R.Text | Should -Match 'Containers: 4 running, 0 unhealthy, 2 stopped'
         }
         It 'writes no escape codes with NO_COLOR' { $R.Text | Should -Not -Match ([regex]::Escape([string][char]27)) }
+    }
+
+    Context 'convert' {
+        BeforeAll { $R = Invoke-Dsm @('-Print', '-Convert', 'docker run -d --name app -p 8080:80 nginx:1.27') }
+        It 'prints the compose file' {
+            $R.Rc | Should -Be 0
+            $R.Text | Should -Match 'container_name: "app"'
+            $R.Text | Should -Match '- "8080:80"'
+        }
     }
 
     Context 'detailed' {

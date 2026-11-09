@@ -1,0 +1,57 @@
+id	c56d28a85adc513fcb5f9061a8ebd6704554188683b50188b5b1337dbeeedb3f
+name	/web
+image	nginx:1.27-alpine
+imageid	sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea
+state	running
+hostname	c56d28a85adc
+domainname	
+user	
+workdir	/
+env	TZ=Europe/Stockholm
+env	PRICE=$5
+env	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+env	NGINX_VERSION=1.27.5
+env	PKG_RELEASE=1
+env	DYNPKG_RELEASE=1
+env	NJS_VERSION=0.8.10
+env	NJS_RELEASE=1
+cmd	nginx
+cmd	-g
+cmd	daemon off;
+entry	/docker-entrypoint.sh
+label	com.centurylinklabs.watchtower.enable=true
+label	maintainer=NGINX Docker Maintainers <docker-maint@nginx.com>
+tty	false
+stdin	false
+stopsignal	SIGQUIT
+health	{"Interval":30000000000,"Test":["CMD-SHELL","wget -qO- localhost || exit 1"]}
+htest	CMD-SHELL
+htest	wget -qO- localhost || exit 1
+hinterval	30000000000
+htimeout	<no value>
+hretries	<no value>
+hstart	<no value>
+bind	webdata:/usr/share/nginx/html
+bind	/srv/html:/srv:ro
+port	127.0.0.1|8443|443/tcp
+port	|8080|80/tcp
+restart	unless-stopped|0
+netmode	proxy
+privileged	false
+capadd	CAP_NET_ADMIN
+shm	67108864
+memory	268435456
+nanocpus	500000000
+pid	
+ipc	private
+readonly	false
+init	<no value>
+logtype	json-file
+runtime	runc
+gpus	
+autoremove	false
+publishall	false
+cmount	volume|webdata|/usr/share/nginx/html
+cmount	bind|<no value>|/srv
+net	proxy|172.30.0.50|www
+

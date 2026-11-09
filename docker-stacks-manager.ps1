@@ -38,6 +38,12 @@ param(
     [Alias('n')][switch]$Network,
     # Directory holding your stacks
     [Alias('d')][string]$Dir,
+    # Convert a container started with docker run into a compose stack
+    [string]$Import,
+    # Convert a docker run command into a compose stack ('-' reads stdin)
+    [string]$Convert,
+    # With -Import/-Convert: only print the compose file
+    [switch]$Print,
     # Update this script to the latest release
     [Alias('U')][switch]$Update,
     # Print the version
@@ -46,7 +52,9 @@ param(
     [Alias('h')][switch]$Help
 )
 
-$script:DsmVersion = '1.1.0'
+$script:DsmVersion = '1.2.0'
+$script:ImportGiven = $PSBoundParameters.ContainsKey('Import')
+$script:ConvertGiven = $PSBoundParameters.ContainsKey('Convert')
 $script:DsmRepo = 'datstma/docker-stacks-manager'
 $script:ComposeFileNames = @('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml')
 $script:RefreshSecs = 5
@@ -712,6 +720,872 @@ function Get-NetworkLines {
 }
 
 # ============================================================================
+# Import: docker run commands and existing containers -> compose stacks
+# ============================================================================
+# Both sources fill one service spec ($script:Spec): S holds single values, L
+# lists, NetIp/NetIp6/NetAlias per-network settings. Keys starting with "_"
+# are internal; the others are compose keys. ConvertTo-ComposeYaml prints it.
+
+function New-Spec {
+    $script:Spec = @{ S = @{}; L = @{}; NetIp = @{}; NetIp6 = @{}; NetAlias = @{} }
+}
+
+function Add-SpecItem([string]$Key, [string]$Value) {
+    if (-not $script:Spec.L.ContainsKey($Key)) { $script:Spec.L[$Key] = New-Object System.Collections.Generic.List[string] }
+    $script:Spec.L[$Key].Add($Value)
+}
+
+function Add-SpecItemOnce([string]$Key, [string]$Value) {
+    if (-not ($script:Spec.L.ContainsKey($Key) -and $script:Spec.L[$Key].Contains($Value))) { Add-SpecItem $Key $Value }
+}
+
+function Add-SpecWarning([string]$Text) { Add-SpecItemOnce '_warn' $Text }
+
+function Get-SpecList([string]$Key) {
+    if ($script:Spec.L.ContainsKey($Key)) { return $script:Spec.L[$Key].ToArray() }
+    return @()
+}
+
+function Get-SpecValue([string]$Key) {
+    if ($script:Spec.S.ContainsKey($Key)) { return [string]$script:Spec.S[$Key] }
+    return ''
+}
+
+# Split a command line into words. POSIX quoting ('...', "...", \") and line
+# continuations from sh (\), PowerShell (`) and cmd (^) are understood; a
+# backslash elsewhere stays, so Windows paths survive. Variables are not
+# expanded. Throws on an unclosed quote.
+function Split-ShellWords([string]$Text) {
+    $Text = $Text -replace '[\\`^][ \t]*\r?\n', ' '
+    $words = New-Object System.Collections.Generic.List[string]
+    $sb = New-Object System.Text.StringBuilder
+    $have = $false; $q = ''; $i = 0; $n = $Text.Length
+    while ($i -lt $n) {
+        $c = [string]$Text[$i]
+        if ($q -eq "'") {
+            if ($c -eq "'") { $q = '' } else { [void]$sb.Append($c) }
+        } elseif ($q -eq '"') {
+            if ($c -eq '"') { $q = '' }
+            elseif ($c -eq '\' -and $i + 1 -lt $n -and '"$`\'.Contains([string]$Text[$i + 1])) { $i++; [void]$sb.Append($Text[$i]) }
+            else { [void]$sb.Append($c) }
+        } elseif ($c -eq ' ' -or $c -eq "`t" -or $c -eq "`n" -or $c -eq "`r") {
+            if ($have) { $words.Add($sb.ToString()); [void]$sb.Clear(); $have = $false }
+        } elseif ($c -eq "'" -or $c -eq '"') {
+            $q = $c; $have = $true
+        } elseif ($c -eq '\' -and $i + 1 -lt $n -and " `t'`"\".Contains([string]$Text[$i + 1])) {
+            $i++; [void]$sb.Append($Text[$i]); $have = $true
+        } elseif ($c -eq '#' -and -not $have) {
+            break
+        } else {
+            [void]$sb.Append($c); $have = $true
+        }
+        $i++
+    }
+    if ($q) { throw 'the command has an unclosed quote' }
+    if ($have) { $words.Add($sb.ToString()) }
+    return , $words.ToArray()
+}
+
+# Long name of a docker run short option ('' if unknown)
+function Get-RunShortOption([string]$Letter) {
+    switch -CaseSensitive ($Letter) {
+        'd' { return '--detach' }      'i' { return '--interactive' } 't' { return '--tty' }
+        'P' { return '--publish-all' } 'q' { return '--quiet' }       'a' { return '--attach' }
+        'c' { return '--cpu-shares' }  'e' { return '--env' }         'h' { return '--hostname' }
+        'l' { return '--label' }       'm' { return '--memory' }      'p' { return '--publish' }
+        'u' { return '--user' }        'v' { return '--volume' }      'w' { return '--workdir' }
+    }
+    return ''
+}
+
+# How a docker run option converts: s:KEY (one value), l:KEY (a list), b:KEY
+# (a flag set to true), x (handled by Invoke-RunOption), f / v (dropped flag /
+# dropped option with a value), '' (unknown)
+$script:RunOptionKinds = @{
+    '--name' = 's:container_name'; '--hostname' = 's:hostname'; '--domainname' = 's:domainname'
+    '--user' = 's:user'; '--workdir' = 's:working_dir'; '--restart' = 's:restart'; '--pid' = 's:pid'
+    '--ipc' = 's:ipc'; '--uts' = 's:uts'; '--userns' = 's:userns_mode'; '--cgroupns' = 's:cgroup'
+    '--cgroup-parent' = 's:cgroup_parent'; '--isolation' = 's:isolation'; '--runtime' = 's:runtime'
+    '--platform' = 's:platform'; '--pull' = 's:pull_policy'; '--mac-address' = 's:mac_address'
+    '--stop-signal' = 's:stop_signal'; '--shm-size' = 's:shm_size'; '--memory' = 's:mem_limit'
+    '--memory-reservation' = 's:mem_reservation'; '--memory-swap' = 's:memswap_limit'
+    '--memory-swappiness' = 's:mem_swappiness'; '--cpus' = 's:cpus'; '--cpu-shares' = 's:cpu_shares'
+    '--cpuset-cpus' = 's:cpuset'; '--cpu-period' = 's:cpu_period'; '--cpu-quota' = 's:cpu_quota'
+    '--pids-limit' = 's:pids_limit'; '--oom-score-adj' = 's:oom_score_adj'; '--log-driver' = 's:_log_driver'
+    '--gpus' = 's:_gpus'; '--health-cmd' = 's:_health_cmd'; '--health-interval' = 's:_health_interval'
+    '--health-timeout' = 's:_health_timeout'; '--health-retries' = 's:_health_retries'
+    '--health-start-period' = 's:_health_start_period'; '--health-start-interval' = 's:_health_start_interval'
+    '--env' = 'l:environment'; '--env-file' = 'l:env_file'; '--label' = 'l:labels'; '--annotation' = 'l:annotations'
+    '--publish' = 'l:ports'; '--expose' = 'l:expose'; '--tmpfs' = 'l:tmpfs'; '--add-host' = 'l:extra_hosts'
+    '--link' = 'l:external_links'; '--dns' = 'l:dns'; '--dns-search' = 'l:dns_search'; '--dns-option' = 'l:dns_opt'
+    '--cap-add' = 'l:cap_add'; '--cap-drop' = 'l:cap_drop'; '--device' = 'l:devices'
+    '--device-cgroup-rule' = 'l:device_cgroup_rules'; '--security-opt' = 'l:security_opt'
+    '--group-add' = 'l:group_add'; '--sysctl' = 'l:sysctls'; '--ulimit' = 'l:_ulimits'; '--log-opt' = 'l:_log_opts'
+    '--storage-opt' = 'l:_storage_opt'; '--network-alias' = 'l:_aliases'
+    '--volume' = 'x'; '--mount' = 'x'; '--network' = 'x'; '--ip' = 'x'; '--ip6' = 'x'; '--entrypoint' = 'x'
+    '--stop-timeout' = 'x'; '--volumes-from' = 'x'
+    '--tty' = 'b:tty'; '--interactive' = 'b:stdin_open'; '--privileged' = 'b:privileged'; '--init' = 'b:init'
+    '--read-only' = 'b:read_only'; '--oom-kill-disable' = 'b:oom_kill_disable'; '--no-healthcheck' = 'b:_health_disable'
+    '--detach' = 'f'; '--rm' = 'f'; '--publish-all' = 'f'; '--sig-proxy' = 'f'; '--quiet' = 'f'
+    '--disable-content-trust' = 'f'; '--help' = 'f'
+    '--attach' = 'v'; '--cidfile' = 'v'; '--detach-keys' = 'v'; '--label-file' = 'v'; '--volume-driver' = 'v'
+    '--blkio-weight' = 'v'; '--blkio-weight-device' = 'v'; '--cpu-rt-period' = 'v'; '--cpu-rt-runtime' = 'v'
+    '--cpuset-mems' = 'v'; '--device-read-bps' = 'v'; '--device-read-iops' = 'v'; '--device-write-bps' = 'v'
+    '--device-write-iops' = 'v'; '--kernel-memory' = 'v'; '--link-local-ip' = 'v'; '--io-maxbandwidth' = 'v'
+    '--io-maxiops' = 'v'
+}
+
+function Get-RunOptionKind([string]$Option) {
+    # Hashtable keys ignore case; docker's options don't
+    if ($Option -cne $Option.ToLowerInvariant()) { return '' }
+    if ($script:RunOptionKinds.ContainsKey($Option)) { return $script:RunOptionKinds[$Option] }
+    return ''
+}
+
+function Invoke-RunOption([string]$Option, [string]$Kind, [string]$Value) {
+    $sp = $script:Spec
+    if ($Kind.StartsWith('s:')) { $sp.S[$Kind.Substring(2)] = $Value; return }
+    if ($Kind.StartsWith('l:')) { Add-SpecItem $Kind.Substring(2) $Value; return }
+    if ($Kind.StartsWith('b:')) { $sp.S[$Kind.Substring(2)] = 'true'; return }
+    switch ($Kind) {
+        'f' {
+            if ($Option -eq '--rm') { Add-SpecWarning '--rm has no compose equivalent: compose keeps the container (docker compose run --rm is the one-off form)' }
+            if ($Option -eq '--publish-all') { Add-SpecWarning '--publish-all (-P) is not converted: list the ports under ports:' }
+        }
+        'v' {
+            if (@('--attach', '--cidfile', '--detach-keys') -notcontains $Option) { Add-SpecWarning "$Option is not converted" }
+        }
+        'x' {
+            switch ($Option) {
+                '--volume' { Add-SpecVolume $Value }
+                '--mount' { Add-SpecMount $Value }
+                '--network' { Add-SpecNetwork $Value }
+                '--ip' { $sp.S['_ip'] = $Value }
+                '--ip6' { $sp.S['_ip6'] = $Value }
+                '--entrypoint' { $sp.L['entrypoint'] = New-Object System.Collections.Generic.List[string]; if ($Value) { Add-SpecItem 'entrypoint' $Value }; $sp.S['_entry_set'] = '1' }
+                '--stop-timeout' { $sp.S['stop_grace_period'] = "${Value}s" }
+                '--volumes-from' { Add-SpecItem 'volumes_from' "container:$Value" }
+            }
+        }
+    }
+}
+
+# A -v/--volume value; named volumes are also declared at the top level
+function Add-SpecVolume([string]$Value) {
+    if ($Value.Contains(':') -and $Value -notmatch '^[A-Za-z]:[\\/]') {
+        $src = $Value.Substring(0, $Value.IndexOf(':'))
+        if ($src -match '^\.') {
+            Add-SpecWarning "The relative path $src is now relative to the stack folder"
+        } elseif ($src -and $src -notmatch '^[/~$]' -and $src -notmatch '[/\\]') {
+            Add-SpecItemOnce '_volumes' $src
+        }
+    }
+    Add-SpecItem 'volumes' $Value
+}
+
+# A --mount value (type=bind|volume|tmpfs,source=...,target=...,readonly)
+function Add-SpecMount([string]$Value) {
+    $type = 'volume'; $src = ''; $dst = ''; $ro = ''; $size = ''; $mode = ''; $extra = ''
+    foreach ($kv in $Value.Split(',')) {
+        $eq = $kv.IndexOf('=')
+        if ($eq -ge 0) { $k = $kv.Substring(0, $eq); $v = $kv.Substring($eq + 1) } else { $k = $kv; $v = 'true' }
+        switch ($k.ToLowerInvariant()) {
+            'type' { $type = $v }
+            { $_ -eq 'source' -or $_ -eq 'src' } { $src = $v }
+            { $_ -eq 'destination' -or $_ -eq 'dst' -or $_ -eq 'target' } { $dst = $v }
+            { $_ -eq 'readonly' -or $_ -eq 'ro' } { if ($v -eq 'true' -or $v -eq '1') { $ro = ':ro' } }
+            'tmpfs-size' { $size = $v }
+            'tmpfs-mode' { $mode = $v }
+            default { $extra += " $k" }
+        }
+    }
+    if (-not $dst) { Add-SpecWarning "--mount $Value has no target; skipped"; return }
+    switch ($type) {
+        { $_ -eq 'bind' -or $_ -eq 'volume' } {
+            if ($extra) { Add-SpecWarning "--mount options dropped:$extra (the long volume syntax can keep them)" }
+            if ($src) { Add-SpecVolume "${src}:$dst$ro" } else { Add-SpecItem 'volumes' $dst }
+        }
+        'tmpfs' {
+            $opts = @()
+            if ($size) { $opts += "size=$size" }
+            if ($mode) { $opts += "mode=$mode" }
+            if ($opts.Count -gt 0) { Add-SpecItem 'tmpfs' "${dst}:$($opts -join ',')" } else { Add-SpecItem 'tmpfs' $dst }
+        }
+        default { Add-SpecWarning "--mount type=$type is not converted" }
+    }
+}
+
+# A --network value: a mode (host, none, container:x) or a network to join
+function Add-SpecNetwork([string]$Value) {
+    $sp = $script:Spec
+    if ($Value -eq 'default') { return }
+    if (@('host', 'none', 'bridge') -contains $Value -or $Value.StartsWith('container:')) { $sp.S['network_mode'] = $Value; return }
+    if ($Value.Contains('=')) {
+        $name = ''; $ip = ''; $ip6 = ''; $aliases = @()
+        foreach ($kv in $Value.Split(',')) {
+            $eq = $kv.IndexOf('='); if ($eq -lt 0) { continue }
+            $k = $kv.Substring(0, $eq); $v = $kv.Substring($eq + 1)
+            switch ($k) {
+                'name' { $name = $v }
+                'ip' { $ip = $v }
+                'ip6' { $ip6 = $v }
+                'alias' { $aliases += $v }
+                default { Add-SpecWarning "--network option $k is not converted" }
+            }
+        }
+        if ($name) {
+            Add-SpecNetwork $name
+            if ($ip) { $sp.NetIp[$name] = $ip }
+            if ($ip6) { $sp.NetIp6[$name] = $ip6 }
+            if ($aliases.Count -gt 0) { $sp.NetAlias[$name] = $aliases }
+        }
+        return
+    }
+    Add-SpecItemOnce 'networks' $Value
+}
+
+# Fill the spec from the words of a docker run (or create) command
+function ConvertFrom-RunWords([string[]]$Words) {
+    New-Spec
+    $sp = $script:Spec
+    $sp.S['_source'] = 'run'
+    $stopWords = @('|', '||', '&&', ';', '&', '>', '>>')
+    $n = $Words.Count; $i = 0; $found = $false
+    for ($j = 0; $j -lt $n; $j++) {
+        $leaf = (($Words[$j] -split '[\\/]')[-1]) -replace '\.exe$', ''
+        if ($leaf -eq 'docker' -or $leaf -eq 'podman') { $found = $true; $i = $j + 1; break }
+    }
+    if ($found) {
+        while ($i -lt $n -and $Words[$i].StartsWith('-')) {
+            if (@('-H', '--host', '-c', '--context', '--config', '-l', '--log-level', '--tlscacert', '--tlscert', '--tlskey') -ccontains $Words[$i]) { $i += 2 } else { $i++ }
+        }
+        if ($i -lt $n -and $Words[$i] -eq 'container') { $i++ }
+        if ($i -ge $n -or ($Words[$i] -ne 'run' -and $Words[$i] -ne 'create')) { throw 'not a docker run command' }
+        $i++
+    } elseif ($n -gt 0 -and ($Words[0] -eq 'run' -or $Words[0] -eq 'create')) {
+        $i = 1
+    }
+
+    while ($i -lt $n) {
+        $a = $Words[$i]
+        if ($stopWords -contains $a) { Add-SpecWarning "Stopped at `"$a`": only the docker run command itself is converted"; break }
+        if ($a -eq '--') { $i++; break }
+        if ($a.StartsWith('--') -and $a.Length -gt 2) {
+            $eq = $a.IndexOf('=')
+            if ($eq -gt 0) { $opt = $a.Substring(0, $eq); $val = $a.Substring($eq + 1); $hasVal = $true } else { $opt = $a; $val = ''; $hasVal = $false }
+            if ($opt -eq '--net') { $opt = '--network' } elseif ($opt -eq '--net-alias') { $opt = '--network-alias' }
+            $kind = Get-RunOptionKind $opt
+            if ($kind.StartsWith('b:') -or $kind -eq 'f') {
+                if (-not $hasVal -or ($val -ne 'false' -and $val -ne '0')) { Invoke-RunOption $opt $kind '' }
+            } elseif ($kind -eq '') {
+                Add-SpecWarning "$opt is not a docker run option this tool knows; skipped"
+            } else {
+                if (-not $hasVal) {
+                    $i++
+                    if ($i -ge $n) { throw "$opt needs a value" }
+                    $val = $Words[$i]
+                }
+                Invoke-RunOption $opt $kind $val
+            }
+        } elseif ($a.StartsWith('-') -and $a.Length -gt 1) {
+            for ($j = 1; $j -lt $a.Length; $j++) {
+                $c = [string]$a[$j]
+                $opt = Get-RunShortOption $c
+                if (-not $opt) { Add-SpecWarning "-$c is not a docker run option this tool knows; skipped"; continue }
+                $kind = Get-RunOptionKind $opt
+                if ($kind.StartsWith('b:') -or $kind -eq 'f') { Invoke-RunOption $opt $kind ''; continue }
+                $val = $a.Substring($j + 1)
+                if (-not $val) {
+                    $i++
+                    if ($i -ge $n) { throw "-$c needs a value" }
+                    $val = $Words[$i]
+                }
+                Invoke-RunOption $opt $kind $val
+                break
+            }
+        } else {
+            break
+        }
+        $i++
+    }
+
+    if ($i -ge $n -or $stopWords -contains $Words[$i]) { throw 'no image in the command' }
+    $sp.S['image'] = $Words[$i]
+    for ($i++; $i -lt $n; $i++) {
+        if ($stopWords -contains $Words[$i]) { Add-SpecWarning "Stopped at `"$($Words[$i])`": only the docker run command itself is converted"; break }
+        Add-SpecItem 'command' $Words[$i]
+        $sp.S['_cmd_set'] = '1'
+    }
+    Complete-Spec
+}
+
+# Turn a docker run command line (as typed or pasted) into the spec
+function ConvertFrom-RunCommand([string]$Command) {
+    $words = Split-ShellWords $Command
+    if ($words.Count -eq 0) { throw 'no command given' }
+    ConvertFrom-RunWords $words
+    $script:Spec.S['_origin'] = 'this docker run command:'
+    $line = ($Command -replace '[\\`^][ \t]*\r?\n', ' ') -replace '[\r\n]+', ' '
+    $script:Spec.S['_cmdline'] = ($line -replace ' {2,}', ' ').Trim()
+}
+
+# Nanoseconds as a compose duration (30s, 500ms)
+function ConvertTo-ComposeDuration([long]$Ns) {
+    if ($Ns % 1000000000 -eq 0) { return "$($Ns / 1000000000)s" }
+    if ($Ns % 1000000 -eq 0) { return "$($Ns / 1000000)ms" }
+    return "$([long]($Ns / 1000))us"
+}
+
+# Bytes as a compose size (512m, 2g)
+function ConvertTo-ComposeSize([long]$Bytes) {
+    if ($Bytes % 1073741824 -eq 0) { return "$($Bytes / 1073741824)g" }
+    if ($Bytes % 1048576 -eq 0) { return "$($Bytes / 1048576)m" }
+    if ($Bytes % 1024 -eq 0) { return "$($Bytes / 1024)k" }
+    return "${Bytes}b"
+}
+
+# "key=value" strings for a JSON object (labels, sysctls, ...)
+function Get-MapPairs($Object) {
+    if ($null -eq $Object) { return @() }
+    return @($Object.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" })
+}
+
+# Fill the spec from an existing container: one docker inspect for the
+# container and one for its image, whose defaults (environment, labels,
+# command, ...) are left out so the compose file holds only what was set.
+function ConvertFrom-Container([string]$Name) {
+    New-Spec
+    $sp = $script:Spec
+    $sp.S['_source'] = 'container'
+    $sp.S['_dollar'] = 'escape'
+    $c = $null
+    foreach ($o in (ConvertFrom-JsonArray ((Invoke-Docker inspect --type container $Name) -join "`n"))) { $c = $o; break }
+    if ($null -eq $c) { throw "no such container: $Name" }
+    $img = $null
+    foreach ($o in (ConvertFrom-JsonArray ((Invoke-Docker image inspect $c.Image) -join "`n"))) { $img = $o; break }
+    $cfg = $c.Config; $hc = $c.HostConfig
+    $icfg = $null
+    if ($img) { $icfg = $img.Config }
+    if ($null -eq $icfg) {
+        $icfg = New-Object PSObject
+        Add-SpecWarning "The image $($cfg.Image) is no longer on this host, so its defaults could not be told apart from settings made with docker run"
+    }
+
+    $cname = ([string]$c.Name).TrimStart('/')
+    $labels = Get-MapPairs $cfg.Labels
+    foreach ($l in $labels) {
+        if ($l.StartsWith('com.docker.compose.project=')) { throw "$cname is already part of the compose stack $($l.Substring(27))" }
+    }
+    $sp.S['_container'] = $cname
+    $sp.S['_state'] = [string]$c.State.Status
+    $sp.S['_origin'] = "the container `"$cname`""
+    $sp.S['image'] = [string]$cfg.Image
+    if ([string]$cfg.Image -like 'sha256:*') { Add-SpecWarning "The container's image has no name any more; put the right image: in" }
+    $sp.S['container_name'] = $cname
+    $id12 = ([string]$c.Id).Substring(0, 12)
+
+    $netMode = [string]$hc.NetworkMode
+    if ($netMode -eq 'host' -or $netMode -eq 'none') { $sp.S['network_mode'] = $netMode }
+    elseif ($netMode.StartsWith('container:')) {
+        $other = @(Invoke-Docker inspect --format '{{.Name}}' $netMode.Substring(10)) | Select-Object -First 1
+        if ($other) { $sp.S['network_mode'] = 'container:' + ([string]$other).TrimStart('/') } else { $sp.S['network_mode'] = $netMode }
+    }
+    if ($cfg.Hostname -and $cfg.Hostname -ne $id12 -and -not $sp.S.ContainsKey('network_mode')) { $sp.S['hostname'] = [string]$cfg.Hostname }
+    if ($cfg.Domainname) { $sp.S['domainname'] = [string]$cfg.Domainname }
+    if ($cfg.User -and $cfg.User -cne $icfg.User) { $sp.S['user'] = [string]$cfg.User }
+    if ($cfg.WorkingDir -and $cfg.WorkingDir -cne $icfg.WorkingDir) { $sp.S['working_dir'] = [string]$cfg.WorkingDir }
+    if ($cfg.StopSignal -and $cfg.StopSignal -cne $icfg.StopSignal) { $sp.S['stop_signal'] = [string]$cfg.StopSignal }
+
+    $imgEnv = @($icfg.Env)
+    foreach ($e in @($cfg.Env)) { if ($e -and $imgEnv -cnotcontains $e) { Add-SpecItem 'environment' $e } }
+    $imgLabels = Get-MapPairs $icfg.Labels
+    foreach ($l in $labels) { if (-not $l.StartsWith('com.docker.compose.') -and $imgLabels -cnotcontains $l) { Add-SpecItem 'labels' $l } }
+    $us = [string][char]31
+    $entry = @($cfg.Entrypoint | Where-Object { $null -ne $_ }); $ientry = @($icfg.Entrypoint | Where-Object { $null -ne $_ })
+    $cmd = @($cfg.Cmd | Where-Object { $null -ne $_ }); $icmd = @($icfg.Cmd | Where-Object { $null -ne $_ })
+    # Setting an entrypoint drops the image's command, so both go in together
+    if (($entry -join $us) -cne ($ientry -join $us)) {
+        $sp.S['_entry_set'] = '1'
+        foreach ($x in $entry) { Add-SpecItem 'entrypoint' $x }
+        if ($cmd.Count -gt 0) { $sp.S['_cmd_set'] = '1'; foreach ($x in $cmd) { Add-SpecItem 'command' $x } }
+    } elseif (($cmd -join $us) -cne ($icmd -join $us)) {
+        $sp.S['_cmd_set'] = '1'
+        foreach ($x in $cmd) { Add-SpecItem 'command' $x }
+    }
+    if ($cfg.Tty -eq $true) { $sp.S['tty'] = 'true' }
+    if ($cfg.OpenStdin -eq $true) { $sp.S['stdin_open'] = 'true' }
+    $h = $cfg.Healthcheck
+    if ($null -ne $h -and (ConvertTo-Json $h -Compress -Depth 5) -cne (ConvertTo-Json $icfg.Healthcheck -Compress -Depth 5)) {
+        $test = @($h.Test)
+        if ($test.Count -gt 0 -and $test[0] -eq 'NONE') {
+            $sp.S['_health_disable'] = 'true'
+        } else {
+            foreach ($x in $test) { Add-SpecItem '_health_test' $x }
+            foreach ($pair in @(@('interval', 'Interval'), @('timeout', 'Timeout'), @('start_period', 'StartPeriod'))) {
+                $v = $h.($pair[1])
+                if ($v -and [long]$v -gt 0) { $sp.S["_health_$($pair[0])"] = ConvertTo-ComposeDuration ([long]$v) }
+            }
+            if ($h.Retries -and [int]$h.Retries -ne 0) { $sp.S['_health_retries'] = [string]$h.Retries }
+        }
+    }
+
+    # Volumes: -v (Binds), --mount (Mounts), and anonymous volumes, which keep
+    # their ID as the name so their data carries over to the new container
+    $covered = @{}
+    foreach ($b in @($hc.Binds)) {
+        if (-not $b) { continue }
+        Add-SpecVolume $b
+        if ($b -match '^[A-Za-z]:[\\/]') { $rest = $b.Substring(2) } else { $rest = $b }
+        $parts = $rest.Split(':')
+        if ($parts.Count -ge 2) { $covered[$parts[1]] = $true }
+    }
+    foreach ($m in @($hc.Mounts)) {
+        if ($null -eq $m) { continue }
+        $covered[[string]$m.Target] = $true
+        if ($m.Type -eq 'bind' -or $m.Type -eq 'volume') {
+            $ro = ''; if ($m.ReadOnly -eq $true) { $ro = ':ro' }
+            if ($m.Source) { Add-SpecVolume "$($m.Source):$($m.Target)$ro" } else { Add-SpecItem 'volumes' ([string]$m.Target) }
+        } elseif ($m.Type -eq 'tmpfs') {
+            Add-SpecItem 'tmpfs' ([string]$m.Target)
+        }
+    }
+    foreach ($m in @($c.Mounts)) {
+        if ($null -eq $m -or $m.Type -ne 'volume' -or $covered.ContainsKey([string]$m.Destination)) { continue }
+        Add-SpecVolume "$($m.Name):$($m.Destination)"
+        Add-SpecWarning "The anonymous volume at $($m.Destination) is kept by its ID, so its data carries over"
+    }
+
+    if ($hc.PortBindings) {
+        foreach ($p in $hc.PortBindings.PSObject.Properties) {
+            foreach ($b in @($p.Value)) {
+                if ($null -eq $b) { continue }
+                $x = $p.Name -replace '/tcp$', ''
+                $ip = [string]$b.HostIp
+                if ($ip -eq '0.0.0.0' -or $ip -eq '::') { $ip = '' }
+                if ($ip.Contains(':')) { $ip = "[$ip]" }
+                if ($b.HostPort) { $x = "$($b.HostPort):$x" }
+                if ($ip) { $x = "${ip}:$x" }
+                Add-SpecItemOnce 'ports' $x
+            }
+        }
+    }
+
+    $rp = $hc.RestartPolicy
+    $rname = ''; if ($rp) { $rname = [string]$rp.Name }
+    if (-not $rname -or $rname -eq 'no') { $sp.S['_restart_raw'] = 'no' }
+    elseif ($rname -eq 'on-failure' -and $rp.MaximumRetryCount -gt 0) { $sp.S['restart'] = "on-failure:$($rp.MaximumRetryCount)"; $sp.S['_restart_raw'] = $sp.S['restart'] }
+    else { $sp.S['restart'] = $rname; $sp.S['_restart_raw'] = $rname }
+
+    if (-not $sp.S.ContainsKey('network_mode') -and $c.NetworkSettings.Networks) {
+        $onBridge = $false
+        foreach ($p in $c.NetworkSettings.Networks.PSObject.Properties) {
+            $nn = $p.Name
+            if ($nn -eq 'host' -or $nn -eq 'none') { continue }
+            if ($nn -eq 'bridge') { $onBridge = $true; continue }
+            Add-SpecNetwork $nn
+            $ipam = $p.Value.IPAMConfig
+            if ($ipam -and $ipam.IPv4Address) { $sp.NetIp[$nn] = [string]$ipam.IPv4Address }
+            $al = @(@($p.Value.Aliases) | Where-Object { $_ -and $_ -ne $id12 -and $_ -ne $cname -and $_ -ne $c.Id })
+            if ($al.Count -gt 0) { $sp.NetAlias[$nn] = $al }
+        }
+        if ($onBridge -and $sp.L.ContainsKey('networks')) {
+            Add-SpecWarning "The container was also on Docker's default bridge network; compose attaches it to the networks listed only"
+        }
+    }
+
+    if ($hc.Privileged -eq $true) { $sp.S['privileged'] = 'true' }
+    foreach ($pair in @(@('CapAdd', 'cap_add'), @('CapDrop', 'cap_drop'), @('Dns', 'dns'), @('DnsSearch', 'dns_search'),
+            @('DnsOptions', 'dns_opt'), @('ExtraHosts', 'extra_hosts'), @('SecurityOpt', 'security_opt'), @('GroupAdd', 'group_add'))) {
+        foreach ($v in @($hc.($pair[0]))) { if ($v) { Add-SpecItem $pair[1] ([string]$v) } }
+    }
+    foreach ($v in (Get-MapPairs $hc.Sysctls)) { Add-SpecItem 'sysctls' $v }
+    if ($hc.Tmpfs) { foreach ($p in $hc.Tmpfs.PSObject.Properties) { if ($p.Value) { Add-SpecItem 'tmpfs' "$($p.Name):$($p.Value)" } else { Add-SpecItem 'tmpfs' $p.Name } } }
+    foreach ($d in @($hc.Devices)) {
+        if ($null -eq $d) { continue }
+        $v = "$($d.PathOnHost):$($d.PathInContainer)"
+        if ($d.CgroupPermissions -and $d.CgroupPermissions -ne 'rwm') { $v += ":$($d.CgroupPermissions)" }
+        Add-SpecItem 'devices' $v
+    }
+    if ($hc.ShmSize -and [long]$hc.ShmSize -gt 0 -and [long]$hc.ShmSize -ne 67108864) { $sp.S['shm_size'] = ConvertTo-ComposeSize ([long]$hc.ShmSize) }
+    if ($hc.Memory -and [long]$hc.Memory -gt 0) { $sp.S['mem_limit'] = ConvertTo-ComposeSize ([long]$hc.Memory) }
+    if ($hc.NanoCpus -and [long]$hc.NanoCpus -gt 0) { $sp.S['cpus'] = ([double]$hc.NanoCpus / 1e9).ToString([Globalization.CultureInfo]::InvariantCulture) }
+    if ($hc.PidMode) { $sp.S['pid'] = [string]$hc.PidMode }
+    if ($hc.IpcMode -and @('private', 'shareable') -notcontains $hc.IpcMode) { $sp.S['ipc'] = [string]$hc.IpcMode }
+    if ($hc.ReadonlyRootfs -eq $true) { $sp.S['read_only'] = 'true' }
+    if ($hc.Init -eq $true) { $sp.S['init'] = 'true' }
+    if ($hc.LogConfig) {
+        foreach ($v in (Get-MapPairs $hc.LogConfig.Config)) { Add-SpecItem '_log_opts' $v }
+        if ($sp.L.ContainsKey('_log_opts') -or ($hc.LogConfig.Type -and $hc.LogConfig.Type -ne 'json-file')) { $sp.S['_log_driver'] = [string]$hc.LogConfig.Type }
+    }
+    if ($hc.Runtime -and $hc.Runtime -ne 'runc') { $sp.S['runtime'] = [string]$hc.Runtime }
+    if (@($hc.DeviceRequests | Where-Object { $null -ne $_ }).Count -gt 0) {
+        $sp.S['_gpus'] = 'all'
+        Add-SpecWarning 'GPU access is converted as "all GPUs"; check the deploy: section'
+    }
+    foreach ($u in @($hc.Ulimits)) { if ($u) { Add-SpecItem '_ulimits' "$($u.Name)=$($u.Soft):$($u.Hard)" } }
+    if ($hc.AutoRemove -eq $true) { Add-SpecWarning 'The container was started with --rm; compose keeps its containers' }
+    if ($hc.PublishAllPorts -eq $true) { Add-SpecWarning 'The container was started with -P; list any extra ports under ports:' }
+    foreach ($l in @($hc.Links)) {
+        if (-not $l) { continue }
+        $parts = $l.Split(':')
+        Add-SpecItem 'external_links' ($parts[0].TrimStart('/') + ':' + ($parts[-1] -split '/')[-1])
+    }
+    Complete-Spec
+}
+
+# Settings that depend on several options; picks the service and stack names
+function Complete-Spec {
+    $sp = $script:Spec
+    $nets = @(Get-SpecList 'networks')
+    if ($sp.S['_ip'] -or $sp.S['_ip6'] -or $sp.L.ContainsKey('_aliases')) {
+        if ($nets.Count -gt 0) {
+            $first = $nets[0]
+            if ($sp.S['_ip']) { $sp.NetIp[$first] = $sp.S['_ip'] }
+            if ($sp.S['_ip6']) { $sp.NetIp6[$first] = $sp.S['_ip6'] }
+            if ($sp.L.ContainsKey('_aliases')) { $sp.NetAlias[$first] = @($sp.NetAlias[$first]) + (Get-SpecList '_aliases') | Where-Object { $_ } }
+        } else {
+            Add-SpecWarning '--ip and --network-alias need a user-defined network (--network); dropped'
+        }
+    }
+    if ($sp.S['_health_cmd']) {
+        $sp.L['_health_test'] = New-Object System.Collections.Generic.List[string]
+        Add-SpecItem '_health_test' 'CMD-SHELL'
+        Add-SpecItem '_health_test' $sp.S['_health_cmd']
+    }
+    if ($sp.S['network_mode'] -and $nets.Count -gt 0) {
+        Add-SpecWarning "network_mode $($sp.S['network_mode']) can't be combined with networks:; the networks were dropped"
+        [void]$sp.L.Remove('networks')
+    }
+    $base = Get-SpecValue 'container_name'
+    if (-not $base) {
+        $base = ((Get-SpecValue 'image') -split '/')[-1]
+        $base = ($base -split '[:@]')[0]
+    }
+    $base = ($base.ToLowerInvariant() -replace '[^a-z0-9_.-]', '-') -replace '^[^a-z0-9]+', ''
+    if (-not $base) { $base = 'app' }
+    $sp.S['_service'] = $base
+    $sp.S['_stack'] = $base.Replace('.', '-')
+    if ($sp.S['_source'] -eq 'run') {
+        $all = @($sp.S.Values) + @($sp.L.Values | ForEach-Object { $_ })
+        if (@($all | Where-Object { "$_".Contains('$') }).Count -gt 0) {
+            Add-SpecWarning 'Compose fills in $VARIABLES from your environment or the stack''s .env file (use $$ for a literal $)'
+        }
+    }
+}
+
+# A YAML double-quoted string. Values taken from a container are literal, so
+# $ is doubled to stop compose interpolating it.
+function Format-YamlString([string]$Text) {
+    $s = $Text.Replace('\', '\\').Replace('"', '\"').Replace("`t", '\t').Replace("`r", '\r')
+    if ($script:Spec.S['_dollar'] -eq 'escape') { $s = $s.Replace('$', '$$') }
+    return '"' + $s + '"'
+}
+
+function Format-YamlFlow([string[]]$Items) {
+    return '[' + ((@($Items) | Where-Object { $null -ne $_ } | ForEach-Object { Format-YamlString $_ }) -join ', ') + ']'
+}
+
+# The spec as compose file lines
+function ConvertTo-ComposeYaml {
+    $sp = $script:Spec
+    $o = New-Object System.Collections.Generic.List[string]
+    $origin = Get-SpecValue '_origin'; if (-not $origin) { $origin = 'a docker run command' }
+    $o.Add("# Generated by docker-stacks-manager $($script:DsmVersion) from $origin")
+    if ($sp.S['_cmdline']) { $o.Add("#   $($sp.S['_cmdline'])") }
+    $o.Add('# Review it before use; `docker compose config` checks it.')
+    $warn = @(Get-SpecList '_warn')
+    if ($warn.Count -gt 0) {
+        $o.Add('#'); $o.Add('# Notes:')
+        foreach ($w in $warn) { $o.Add("#   - $w") }
+    }
+    $o.Add('services:')
+    $o.Add("  $($sp.S['_service']):")
+    $o.Add("    image: $(Format-YamlString (Get-SpecValue 'image'))")
+    foreach ($k in 'container_name', 'hostname', 'domainname', 'user', 'working_dir') {
+        if ($sp.S[$k]) { $o.Add("    ${k}: $(Format-YamlString $sp.S[$k])") }
+    }
+    if ($sp.S['_entry_set']) { $o.Add("    entrypoint: $(Format-YamlFlow (Get-SpecList 'entrypoint'))") }
+    if ($sp.S['_cmd_set']) { $o.Add("    command: $(Format-YamlFlow (Get-SpecList 'command'))") }
+    foreach ($k in 'restart', 'network_mode') {
+        if ($sp.S[$k]) { $o.Add("    ${k}: $(Format-YamlString $sp.S[$k])") }
+    }
+
+    $nets = @(Get-SpecList 'networks')
+    if ($nets.Count -gt 0) {
+        $o.Add('    networks:')
+        $map = @($nets | Where-Object { $sp.NetIp[$_] -or $sp.NetIp6[$_] -or $sp.NetAlias[$_] }).Count -gt 0
+        foreach ($nn in $nets) {
+            $q = Format-YamlString $nn
+            if (-not $map) { $o.Add("      - $q"); continue }
+            if (-not ($sp.NetIp[$nn] -or $sp.NetIp6[$nn] -or $sp.NetAlias[$nn])) { $o.Add("      ${q}: {}"); continue }
+            $o.Add("      ${q}:")
+            if ($sp.NetIp[$nn]) { $o.Add("        ipv4_address: $(Format-YamlString $sp.NetIp[$nn])") }
+            if ($sp.NetIp6[$nn]) { $o.Add("        ipv6_address: $(Format-YamlString $sp.NetIp6[$nn])") }
+            if ($sp.NetAlias[$nn]) { $o.Add("        aliases: $(Format-YamlFlow $sp.NetAlias[$nn])") }
+        }
+    }
+
+    foreach ($k in 'ports', 'expose', 'volumes', 'volumes_from', 'tmpfs', 'environment', 'env_file', 'labels', 'annotations',
+            'extra_hosts', 'external_links', 'dns', 'dns_search', 'dns_opt', 'cap_add', 'cap_drop', 'security_opt',
+            'devices', 'device_cgroup_rules', 'group_add', 'sysctls') {
+        $items = @(Get-SpecList $k)
+        if ($items.Count -eq 0) { continue }
+        $o.Add("    ${k}:")
+        foreach ($v in $items) { $o.Add("      - $(Format-YamlString $v)") }
+    }
+    $ul = @(Get-SpecList '_ulimits')
+    if ($ul.Count -gt 0) {
+        $o.Add('    ulimits:')
+        foreach ($v in $ul) {
+            $eq = $v.IndexOf('='); $un = $v.Substring(0, $eq); $uv = $v.Substring($eq + 1)
+            if ($uv.Contains(':')) {
+                $o.Add("      ${un}:")
+                $o.Add("        soft: $($uv.Split(':')[0])")
+                $o.Add("        hard: $($uv.Split(':')[1])")
+            } else {
+                $o.Add("      ${un}: $uv")
+            }
+        }
+    }
+    $so = @(Get-SpecList '_storage_opt')
+    if ($so.Count -gt 0) {
+        $o.Add('    storage_opt:')
+        foreach ($v in $so) { $eq = $v.IndexOf('='); $o.Add("      $($v.Substring(0, $eq)): $(Format-YamlString $v.Substring($eq + 1))") }
+    }
+    foreach ($k in 'pid', 'ipc', 'uts', 'userns_mode', 'cgroup', 'cgroup_parent', 'isolation', 'runtime', 'platform', 'pull_policy',
+            'mac_address', 'stop_signal', 'stop_grace_period', 'shm_size', 'mem_limit', 'mem_reservation', 'memswap_limit', 'cpuset') {
+        if ($sp.S[$k]) { $o.Add("    ${k}: $(Format-YamlString $sp.S[$k])") }
+    }
+    foreach ($k in 'cpus', 'cpu_shares', 'cpu_period', 'cpu_quota', 'pids_limit', 'oom_score_adj', 'mem_swappiness') {
+        if (-not $sp.S[$k]) { continue }
+        if ($sp.S[$k] -match '^-?[0-9]+(\.[0-9]+)?$') { $o.Add("    ${k}: $($sp.S[$k])") } else { $o.Add("    ${k}: $(Format-YamlString $sp.S[$k])") }
+    }
+    foreach ($k in 'privileged', 'init', 'read_only', 'tty', 'stdin_open', 'oom_kill_disable') {
+        if ($sp.S[$k] -eq 'true') { $o.Add("    ${k}: true") }
+    }
+
+    if ($sp.S['_health_disable']) {
+        $o.Add('    healthcheck:'); $o.Add('      disable: true')
+    } elseif ($sp.L.ContainsKey('_health_test')) {
+        $o.Add('    healthcheck:')
+        $o.Add("      test: $(Format-YamlFlow (Get-SpecList '_health_test'))")
+        foreach ($k in 'interval', 'timeout', 'start_period', 'start_interval') {
+            if ($sp.S["_health_$k"]) { $o.Add("      ${k}: $(Format-YamlString $sp.S["_health_$k"])") }
+        }
+        if ($sp.S['_health_retries']) { $o.Add("      retries: $($sp.S['_health_retries'])") }
+    }
+    $lo = @(Get-SpecList '_log_opts')
+    if ($sp.S['_log_driver'] -or $lo.Count -gt 0) {
+        $drv = Get-SpecValue '_log_driver'; if (-not $drv) { $drv = 'json-file' }
+        $o.Add('    logging:')
+        $o.Add("      driver: $(Format-YamlString $drv)")
+        if ($lo.Count -gt 0) {
+            $o.Add('      options:')
+            foreach ($v in $lo) { $eq = $v.IndexOf('='); $o.Add("        $($v.Substring(0, $eq)): $(Format-YamlString $v.Substring($eq + 1))") }
+        }
+    }
+    if ($sp.S['_gpus']) {
+        $g = $sp.S['_gpus'].Replace('"', '')
+        $o.Add('    deploy:'); $o.Add('      resources:'); $o.Add('        reservations:'); $o.Add('          devices:')
+        $o.Add('            - driver: nvidia')
+        if ($g -eq 'all' -or $g -match '^[0-9]+$') { $o.Add("              count: $g") }
+        elseif ($g.StartsWith('device=')) { $o.Add("              device_ids: $(Format-YamlFlow $g.Substring(7).Split(','))") }
+        $o.Add('              capabilities: [gpu]')
+    }
+
+    if ($nets.Count -gt 0) {
+        $o.Add('networks:')
+        foreach ($nn in $nets) { $o.Add("  $(Format-YamlString $nn):"); $o.Add('    external: true') }
+    }
+    $vols = @(Get-SpecList '_volumes')
+    if ($vols.Count -gt 0) {
+        $o.Add('volumes:')
+        foreach ($vn in $vols) { $o.Add("  $(Format-YamlString $vn):"); $o.Add('    external: true') }
+    }
+    return , $o.ToArray()
+}
+
+# Containers not managed by compose (Id, Name, Image, State), sorted by name
+function Get-StandaloneContainers {
+    $rows = ConvertFrom-JsonLines (Invoke-Docker ps -a --format '[{{json .ID}},{{json .Names}},{{json .Image}},{{json .State}},{{json .Labels}}]')
+    $list = foreach ($r in $rows) {
+        if ([string]$r[4] -match '(^|,)com\.docker\.compose\.project=') { continue }
+        [pscustomobject]@{ Id = [string]$r[0]; Name = [string]$r[1]; Image = [string]$r[2]; State = [string]$r[3] }
+    }
+    return @($list | Sort-Object Name)
+}
+
+# Read a docker run command typed or pasted at the console, following lines
+# that end in \, ` or ^. Returns $null on an empty first line (cancel).
+function Read-CommandLines {
+    $all = ''
+    while ($true) {
+        [Console]::Write('> ')
+        $line = [Console]::ReadLine()
+        if ($null -eq $line) { break }
+        if (-not $all -and -not $line.Trim()) { return $null }
+        $all += $line + "`n"
+        if ($line -notmatch '[\\`^]\s*$') { break }
+    }
+    if (-not $all) { return $null }
+    return $all
+}
+
+# Create the external networks and volumes the spec uses, if missing
+function Initialize-SpecExternals {
+    foreach ($nn in (Get-SpecList 'networks')) {
+        [void](Invoke-Docker network inspect $nn)
+        if ($LASTEXITCODE -ne 0) { Write-Line "Creating network $nn"; [void](Invoke-Docker network create $nn); if ($LASTEXITCODE -ne 0) { return $false } }
+    }
+    foreach ($vn in (Get-SpecList '_volumes')) {
+        [void](Invoke-Docker volume inspect $vn)
+        if ($LASTEXITCODE -ne 0) { Write-Line "Creating volume $vn"; [void](Invoke-Docker volume create $vn); if ($LASTEXITCODE -ne 0) { return $false } }
+    }
+    return $true
+}
+
+# Replace container $Name with the stack in $StackDir. The old container is
+# stopped, renamed and kept (restart policy off) so nothing is lost; if the
+# stack doesn't start, everything is put back.
+function Move-ContainerToStack([string]$Name, [string]$StackDir) {
+    $old = "$Name-pre-compose"
+    [void](Invoke-Docker inspect --type container $old)
+    if ($LASTEXITCODE -eq 0) { $old = "$Name-pre-compose-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" }
+    $state = Get-SpecValue '_state'
+    $wasRunning = ($state -eq 'running' -or $state -eq 'restarting')
+    Write-Line "${cCyan}Stopping $Name...${cReset}"
+    [void](Invoke-Docker stop $Name)
+    if ($LASTEXITCODE -ne 0) { Write-Line "${cRed}Could not stop $Name; nothing was changed${cReset}"; return $false }
+    [void](Invoke-Docker rename $Name $old)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Line "${cRed}Could not rename $Name; starting it again${cReset}"
+        if ($wasRunning) { [void](Invoke-Docker start $Name) }
+        return $false
+    }
+    [void](Invoke-Docker update --restart=no $old)
+    Write-Line "${cCyan}Starting the stack...${cReset}"
+    if ((Invoke-DockerAttached @('compose', 'up', '-d') $StackDir) -eq 0) {
+        Write-Line
+        Write-Line "${cGreen}✓ $Name now runs from $StackDir${cReset}"
+        Write-Line "The old container is stopped and kept as $old."
+        Write-Line "Once the stack works, remove it with:  docker rm $old"
+        return $true
+    }
+    Write-Line "${cRed}The stack did not start; putting the old container back${cReset}"
+    $savedDir = Get-Location
+    try { Set-Location -LiteralPath $StackDir; [void](Invoke-Docker compose down) } finally { Set-Location $savedDir }
+    [void](Invoke-Docker rename $old $Name)
+    $restart = Get-SpecValue '_restart_raw'; if (-not $restart) { $restart = 'no' }
+    [void](Invoke-Docker update "--restart=$restart" $Name)
+    if ($wasRunning) { [void](Invoke-Docker start $Name) }
+    Write-Line "compose.yaml is still in $StackDir for you to fix."
+    return $false
+}
+
+# Show the compose file for the spec, then write it to a new stack folder and
+# offer to start it (replacing the container it came from, if any)
+function Invoke-ComposeWizard {
+    $yaml = ConvertTo-ComposeYaml
+    Write-Line
+    foreach ($l in $yaml) { if ($l.StartsWith('#')) { Write-Line "${cDim}$l${cReset}" } else { Write-Line $l } }
+    Write-Line
+    $def = Get-SpecValue '_stack'
+    while ($true) {
+        [Console]::Write("Stack folder name in $($script:BaseDir) [$def]: ")
+        $name = [Console]::ReadLine()
+        if ($null -eq $name) { Write-Line; return }
+        $name = $name.Trim()
+        if (-not $name) { $name = $def }
+        if ($name -cnotmatch '^[a-z0-9][a-z0-9_-]*$') {
+            Write-Line "${cYellow}Use lowercase letters, digits, - and _ (a compose project name)${cReset}"
+            continue
+        }
+        $dir = Join-Path $script:BaseDir $name
+        $exists = @($script:ComposeFileNames | Where-Object { Test-Path -LiteralPath (Join-Path $dir $_) })
+        if ($exists.Count -gt 0) { Write-Line "${cYellow}$dir already has a $($exists[0]); pick another name${cReset}"; continue }
+        break
+    }
+    $file = Join-Path $dir 'compose.yaml'
+    if (-not (Confirm-Action "Write ${file}?")) { Write-Line 'Cancelled; nothing was written.'; return }
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        [IO.File]::WriteAllText($file, (($yaml -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))
+    } catch {
+        Write-Line "${cRed}Could not write ${file}: $($_.Exception.Message)${cReset}"
+        return
+    }
+    Write-Line "${cGreen}✓ Wrote $file${cReset}"
+    Write-Line
+
+    if ((Get-SpecValue '_source') -eq 'container') {
+        $c = Get-SpecValue '_container'
+        Write-Line "To run $c from the stack, it has to be replaced: it is stopped and kept"
+        Write-Line "as $c-pre-compose (not started again on boot), then the stack starts."
+        Write-Line "Volumes and bind mounts carry over. If the stack fails, $c is put back."
+        if (Confirm-Action "Switch $c over to the stack now?") {
+            [void](Move-ContainerToStack $c $dir)
+            return
+        }
+        Write-Line "Left $c as it is. To switch over later:"
+        Write-Line "  docker stop $c; docker rename $c $c-pre-compose; docker update --restart=no $c-pre-compose"
+        Write-Line "  cd `"$dir`"; docker compose up -d"
+    } else {
+        if (Confirm-Action 'Start the stack now (docker compose up -d)?') {
+            if (Initialize-SpecExternals) { [void](Invoke-DockerAttached @('compose', 'up', '-d') $dir) }
+            return
+        }
+        Write-Line "To start it later:  cd `"$dir`"; docker compose up -d"
+    }
+}
+
+# -Import / -Convert from the command line
+function Invoke-ImportCli {
+    try {
+        if ($script:ConvertGiven) {
+            $cmd = $Convert
+            if (-not $cmd -or $cmd -eq '-') {
+                if ([Console]::IsInputRedirected) {
+                    $cmd = [Console]::In.ReadToEnd()
+                } else {
+                    Write-Line 'Paste or type a docker run command (lines ending in \ or ` continue):'
+                    $cmd = Read-CommandLines
+                    if ($null -eq $cmd) { Write-Line 'Cancelled.'; return 1 }
+                }
+            }
+            ConvertFrom-RunCommand $cmd
+        } elseif ($Import) {
+            ConvertFrom-Container $Import
+        } else {
+            $Import = ''
+            throw 'no such container: '
+        }
+    } catch {
+        $msg = $_.Exception.Message
+        if ($msg -like 'no such container:*') {
+            if ($Import) { [Console]::Error.WriteLine("Error: $msg") }
+            $list = Get-StandaloneContainers
+            if ($list.Count -eq 0) { Write-Line 'Every container is already managed by compose.' }
+            else {
+                Write-Line "${cBold}Containers not managed by compose${cReset}"
+                foreach ($s in $list) { Write-Line ('  {0,-28} {1,-36} {2}' -f $s.Name, $s.Image, $s.State) }
+                Write-Line
+                Write-Line 'Convert one with:  dsm -Import NAME'
+            }
+            if ($Import) { return 1 }
+            return 0
+        }
+        [Console]::Error.WriteLine("Error: $msg")
+        return 1
+    }
+    if ($Print -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        ConvertTo-ComposeYaml
+        return 0
+    }
+    Invoke-ComposeWizard
+    return 0
+}
+
+# ============================================================================
 # Terminal UI helpers
 # ============================================================================
 
@@ -896,7 +1770,7 @@ function Show-StackMenu {
         if ($view.Count -eq 0) { $frame.Add("  ${cDim}(no stacks match)${cReset}") }
         if ($top + $avail -lt $view.Count) { $frame.Add("  ${cDim}↓ $($view.Count - $top - $avail) more${cReset}") }
         $frame.Add('')
-        $frame.Add("${cCyan}[L]ogs [R]estart [S]top [U]p [D]own [N]etwork [T]raffic${cReset}")
+        $frame.Add("${cCyan}[L]ogs [R]estart [S]top [U]p [D]own [N]etwork [T]raffic [I]mport${cReset}")
         $frame.Add("${cDim}↑/↓ j/k move · Enter containers · / filter · q quit · refreshes every $($script:RefreshSecs)s${cReset}")
         Write-Frame $frame.ToArray()
 
@@ -924,6 +1798,7 @@ function Show-StackMenu {
             'down' { if ($view.Count -gt 0) { $selected = ($selected + 1) % $view.Count } }
             'esc' { $filter = ''; $selected = 0; $top = 0 }
             '/' { $editing = $true; $selected = 0; $top = 0 }
+            { $_ -eq 'i' -or $_ -eq 'I' } { Show-ImportMenu; Get-Snapshot }
         }
         if ($null -eq $sel) { continue }
         switch ($key) {
@@ -935,6 +1810,73 @@ function Show-StackMenu {
             'n' { Show-AllNetworks }
             't' { Show-Traffic; Get-Snapshot }
             'enter' { Show-ContainerMenu $sel.Dir; Get-Snapshot }
+        }
+    }
+}
+
+# Import menu: paste a docker run command, or pick a container compose
+# doesn't manage, and turn it into a stack
+function Show-ImportMenu {
+    $selected = 0; $top = 0
+    while ($true) {
+        $list = @(Get-StandaloneContainers)
+        $count = $list.Count + 1
+        if ($selected -ge $count) { $selected = $count - 1 }
+        $rows = Get-TuiRows
+        $frame = New-Object System.Collections.Generic.List[string]
+        $frame.Add("${cBold}Import into a compose stack${cReset}  ${cDim}new stacks go in $($script:BaseDir)${cReset}")
+        $frame.Add('')
+        if ($selected -eq 0) { $frame.Add("${cRev}> Paste a docker run command... ${cReset}") } else { $frame.Add('  Paste a docker run command...') }
+        $frame.Add('')
+        if ($list.Count -eq 0) { $frame.Add("  ${cDim}Every container is already managed by compose${cReset}") }
+        else { $frame.Add("  ${cBold}Containers not managed by compose${cReset}") }
+        $avail = $rows - 10
+        if ($avail -lt 3) { $avail = 3 }
+        if ($selected -gt 0 -and $selected - 1 -lt $top) { $top = $selected - 1 }
+        if ($selected -gt 0 -and $selected - 1 -ge $top + $avail) { $top = $selected - $avail }
+        for ($n = $top; $n -lt $list.Count -and $n -lt $top + $avail; $n++) {
+            $s = $list[$n]
+            $line = '{0,-28} {1,-36}' -f $s.Name, $s.Image
+            if ($s.State -eq 'running') { $st = "${cGreen}$($s.State)${cReset}" } else { $st = "${cDim}$($s.State)${cReset}" }
+            if ($n + 1 -eq $selected) { $frame.Add("${cRev}> $line ${cReset} $st") } else { $frame.Add("  $line  $st") }
+        }
+        if ($top + $avail -lt $list.Count) { $frame.Add("  ${cDim}↓ $($list.Count - $top - $avail) more${cReset}") }
+        $frame.Add('')
+        $frame.Add("${cCyan}Enter: convert to a compose stack (you see the file before anything is written)${cReset}")
+        $frame.Add("${cDim}↑/↓ j/k move · Esc back${cReset}")
+        Write-Frame $frame.ToArray()
+
+        $key = Read-MenuKey
+        switch -CaseSensitive ($key) {
+            { $_ -eq 'quit' -or $_ -eq 'q' -or $_ -eq 'Q' -or $_ -eq 'esc' } { return }
+            'up' { $selected = ($selected - 1 + $count) % $count }
+            'down' { $selected = ($selected + 1) % $count }
+            'enter' {
+                # The wizard runs on the normal screen, so its output can be scrolled
+                $e = [char]27
+                [Console]::Write("$e[?1049l$e[?25h")
+                # Line input (folder name, pasted command) needs the console's
+                # normal mode, where Ctrl+C is not a key
+                try { [Console]::TreatControlCAsInput = $false } catch { }
+                Write-Line
+                try {
+                    if ($selected -eq 0) {
+                        Write-Line "${cBold}Paste or type a docker run command${cReset}, then press Enter."
+                        Write-Line "${cDim}Lines ending in \ or `` continue on the next one. An empty line cancels.${cReset}"
+                        $cmd = Read-CommandLines
+                        if ($null -ne $cmd) { ConvertFrom-RunCommand $cmd; Invoke-ComposeWizard }
+                    } else {
+                        ConvertFrom-Container $list[$selected - 1].Id
+                        Invoke-ComposeWizard
+                    }
+                } catch {
+                    Write-Line "${cRed}Error: $($_.Exception.Message)${cReset}"
+                }
+                Write-Line
+                Wait-AnyKey
+                try { [Console]::TreatControlCAsInput = $true } catch { }
+                [Console]::Write("$e[?1049h$e[?25l")
+            }
         }
     }
 }
@@ -1088,8 +2030,8 @@ function Invoke-StackAction($Stack, [string]$Action) {
 function Invoke-ServiceAction([string]$StackDir, [string]$Service, [string]$Action) {
     Start-View
     switch ($Action) {
-        'restart' { if (-not (Confirm-Action "Restart $Service?")) { return }; Write-Line "${cYellow}Restarting $Service...${cReset}" }
-        'stop' { if (-not (Confirm-Action "Stop $Service?")) { return }; Write-Line "${cRed}Stopping $Service...${cReset}" }
+        'restart' { if (-not (Confirm-Action "Restart ${Service}?")) { return }; Write-Line "${cYellow}Restarting $Service...${cReset}" }
+        'stop' { if (-not (Confirm-Action "Stop ${Service}?")) { return }; Write-Line "${cRed}Stopping $Service...${cReset}" }
         'start' { Write-Line "${cGreen}Starting $Service...${cReset}" }
     }
     Write-Line
@@ -1413,6 +2355,12 @@ Views:
   -Watch, -w         Redraw the status every 5 seconds
   -Network, -n       Networks and the containers on them
 
+Import (turn plain docker containers into compose stacks, guided):
+  -Import NAME       Convert a container started with docker run
+                     (-Import '' lists the containers compose doesn't manage)
+  -Convert 'CMD'     Convert a docker run command (quote it; '-' reads stdin)
+  -Print             With -Import/-Convert: only print the compose file
+
 Options:
   -Dir, -d DIR       Directory holding your stacks (default: current directory)
   -Update, -U        Update this script to the latest release
@@ -1450,6 +2398,9 @@ function Invoke-Main {
     }
     if (-not (Test-Requirements)) { return 1 }
 
+    if ($script:ImportGiven -or $script:ConvertGiven) {
+        return (Invoke-ImportCli)
+    }
     if ($Interactive) {
         Start-Tui
         try {

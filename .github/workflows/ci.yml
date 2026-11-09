@@ -16,12 +16,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install bash 4+ (macOS ships 3.2)
+      # The test harness itself needs bash 4; the script also runs under zsh
+      - name: Install bash 4+ for the test harness (macOS ships 3.2)
         if: runner.os == 'macOS'
         run: brew install bash
 
+      - name: Install zsh (the suite runs the script under bash and zsh)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y -qq zsh
+
       - name: Test suite
         run: ./tests/run.sh
+
+      - name: macOS's own bash 3.2 hands over to zsh
+        if: runner.os == 'macOS'
+        run: |
+          cd demo/stacks
+          export PATH="$PWD/../../tests/bin:$PATH" DSM_FAKE_DOCKER=replay
+          /bin/bash ../../docker-stacks-manager.sh | perl -pe 's/\e\[[0-9;]*m//g' | tee "$RUNNER_TEMP/bash32.out"
+          grep -q "⚠ monitoring (1/2 running)" "$RUNNER_TEMP/bash32.out"
+          grep -q "Stacks: 3 total, 1 running, 1 with issues, 1 stopped" "$RUNNER_TEMP/bash32.out"
 
       - name: Installer round trip
         run: |

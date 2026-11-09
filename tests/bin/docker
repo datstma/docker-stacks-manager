@@ -42,6 +42,15 @@ case "${DSM_FAKE_DOCKER:-replay}" in
         exit "$rc"
         ;;
     replay)
+        # docker inspect for --import: answered from tests/import
+        imports="$FIXTURES/../import"
+        case "$1 $2" in
+            "inspect --type")
+                [[ -f "$imports/${!#}.container" ]] && { cat "$imports/${!#}.container"; exit 0; } ;;
+            "image inspect")
+                f=$(grep -l "^imageid"$'\t'"${!#}\$" "$imports"/*.container 2>/dev/null | head -1)
+                [[ -n "$f" ]] && { cat "${f%.container}.image"; exit 0; } ;;
+        esac
         if [[ -f "$FIXTURES/$key.out" ]]; then
             cat "$FIXTURES/$key.out"
             exit "$(cat "$FIXTURES/$key.rc")"

@@ -1,0 +1,16 @@
+env	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+env	NGINX_VERSION=1.27.5
+env	PKG_RELEASE=1
+env	DYNPKG_RELEASE=1
+env	NJS_VERSION=0.8.10
+env	NJS_RELEASE=1
+cmd	nginx
+cmd	-g
+cmd	daemon off;
+entry	/docker-entrypoint.sh
+label	maintainer=NGINX Docker Maintainers <docker-maint@nginx.com>
+workdir	/
+user	
+stopsignal	SIGQUIT
+health	null
+

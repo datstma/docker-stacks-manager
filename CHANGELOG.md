@@ -3,6 +3,26 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - unreleased
+
+### Added
+- Import: turn a container started with `docker run`, or a `docker run`
+  command, into a compose stack (`--import NAME`, `--convert CMD...`,
+  `--print`; `-Import`, `-Convert`, `-Print` in PowerShell; `I` in the TUI).
+  The compose file keeps what was set and leaves out the image's defaults;
+  existing volumes and networks are used as `external`, anonymous volumes are
+  kept by ID, and anything without a compose equivalent is noted in the file.
+  A guided flow writes it to a new stack folder and can switch the container
+  over: the old one is stopped and kept as `<name>-pre-compose`, and put back
+  if the stack fails to start
+- The shell script runs under zsh as well as bash 4+. On macOS, whose bash is
+  3.2, it hands itself over to the built-in zsh, so nothing needs installing.
+  CI runs the tests under both shells
+
+### Fixed
+- PowerShell: the restart/stop confirmation for a service left out its name
+- The Bash TUI no longer loops when its input ends
+
 ## [1.1.0] - 2026-11-09
 
 ### Added

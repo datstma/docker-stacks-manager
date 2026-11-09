@@ -2,13 +2,13 @@
 
 <p align="center">
   <strong>See and control every Docker Compose stack on a host from one terminal UI.</strong><br>
-  One script: Bash for Linux and macOS, native PowerShell for Windows. No daemon, no web server, no database.
+  One script: bash or zsh for Linux and macOS, native PowerShell for Windows. No daemon, no web server, no database.
 </p>
 
 <p align="center">
   <a href="https://github.com/datstma/docker-stacks-manager/actions/workflows/ci.yml"><img src="https://github.com/datstma/docker-stacks-manager/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/datstma/docker-stacks-manager/releases/latest"><img src="https://img.shields.io/github/v/release/datstma/docker-stacks-manager?sort=semver" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/bash-4.0+-4EAA25?logo=gnubash&logoColor=white" alt="Bash 4.0+">
+  <img src="https://img.shields.io/badge/bash%204%2B%20%7C%20zsh-4EAA25?logo=gnubash&logoColor=white" alt="bash 4+ | zsh">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1 | 7">
   <img src="https://img.shields.io/badge/docker-compose%20v2-2496ED?logo=docker&logoColor=white" alt="Docker Compose v2">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey" alt="Linux | macOS | Windows">
@@ -19,6 +19,7 @@
   <a href="#-install">Install</a> •
   <a href="#-usage">Usage</a> •
   <a href="#-interactive-mode">Interactive mode</a> •
+  <a href="#-import-docker-run--compose">Import</a> •
   <a href="#-windows-powershell">Windows</a> •
   <a href="#-updating">Updating</a> •
   <a href="#-faq--troubleshooting">FAQ</a> •
@@ -50,9 +51,13 @@ or Portainer's stack view, but in your terminal, with vim keys.
   network (an app routed through a VPN container, a sidecar)
 - **Watchtower aware**: when Watchtower last ran, what it updated or couldn't check, when it
   runs next, and which containers have opted in to auto-updates (`[auto]`)
-- **Linux, macOS and Windows**: a Bash script for Linux, macOS and WSL2, and a native
-  [PowerShell edition](#-windows-powershell) for Windows with Docker Desktop. Same views, same
-  keys. Nothing to install besides Docker
+- **Import into compose**: turn a container you started with `docker run`, or a `docker run`
+  command you paste, into a compose stack. You see the file first; dsm can then switch the
+  container over, keeping its volumes and data, and puts it back if anything fails.
+  [More](#-import-docker-run--compose)
+- **Linux, macOS and Windows**: a shell script for Linux, macOS and WSL2 (bash or zsh, so macOS
+  needs nothing extra), and a native [PowerShell edition](#-windows-powershell) for Windows with
+  Docker Desktop. Same views, same keys. Nothing to install besides Docker
 
 ## 📸 Screenshots
 
@@ -147,7 +152,7 @@ terminal and run `dsm`. More in [Windows (PowerShell)](#-windows-powershell).
 
 | | |
 |---|---|
-| **Bash** | 4.0 or newer. macOS ships 3.2: `brew install bash` |
+| **Shell** | bash 4.0+ or zsh 5.1+. On macOS, whose bash is 3.2, the script runs itself under the built-in zsh: nothing to install |
 | **PowerShell** (Windows) | Windows PowerShell 5.1, which every Windows 10/11 has, or PowerShell 7+ |
 | **Docker** | With the Compose v2 plugin (`docker compose`). The old standalone `docker-compose` v1 is not supported |
 | **Tools** | `awk`, `sed`, `grep`, `find`, `sort` and friends, present on any normal system. `bc` is optional |
@@ -186,6 +191,13 @@ Views:
   -i, --images       Status with image versions
   -w, --watch        Redraw the status every 5 seconds
   -n, --network      Networks and the containers on them
+
+Import (turn plain docker containers into compose stacks, guided):
+  --import NAME      Convert a container started with docker run; without
+                     NAME, lists the containers compose doesn't manage
+  --convert CMD...   Convert a docker run command: the rest of the line, or
+                     read from stdin. Must come last
+  --print            With --import/--convert: only print the compose file
 
 Options:
   -d, --dir DIR      Directory holding your stacks (default: current directory)
@@ -229,6 +241,7 @@ With `-v`, each container also gets its CPU/memory, ports and image:
 | `D` | Down: remove its containers ✋ | |
 | `T` | Live traffic per container | `top` inside the container |
 | `N` | Network view | Network and ports |
+| `I` | [Import](#-import-docker-run--compose) a container or a `docker run` command | |
 | `F` | | Live stats (CPU, memory, network) |
 | `q` | Quit | Back |
 | `Ctrl+C` | Quit | Leave a live view (logs, stats) and return to the menu |
@@ -251,6 +264,66 @@ start, a shell (`bash` or `sh`), `top` and live stats.
 | `↻N` | Restarted N times: probably crash-looping |
 | `[auto]` | Opted in to Watchtower auto-updates |
 
+## 📥 Import: docker run → compose
+
+Containers started with `docker run` are easy to lose track of: the command is gone, and so is
+what it set. dsm turns them into compose stacks, from a running (or stopped) container or from a
+`docker run` command you paste:
+
+```bash
+dsm --import                      # list the containers compose doesn't manage
+dsm --import nginx                # convert one, guided
+dsm --convert docker run -d --name web -p 8080:80 -v web-data:/usr/share/nginx/html nginx:1.27
+dsm --import nginx --print        # just print the compose file
+pbpaste | dsm --convert           # read the command from stdin (prints the file)
+```
+
+In the TUI, press `I` for the same: pick a container, or paste a command (multi-line commands with
+`\` continuations work).
+
+**What you get.** For a container, dsm reads `docker inspect` and leaves out everything that
+came from the image (its environment, labels, command), so the file holds what was actually set:
+ports, volumes and bind mounts, environment, labels, restart policy, networks with static IPs and
+aliases, capabilities, devices, limits, healthcheck, logging and so on. Existing named volumes
+and networks are declared `external`, so compose uses them as they are and `docker compose down
+-v` can't delete your data. `$` in values is escaped so compose doesn't try to fill it in.
+Anything that has no compose equivalent (`--rm`, `-P`, ...) is listed as a note at the top of the
+file.
+
+```yaml
+# Generated by docker-stacks-manager 1.2.0 from the container "web"
+# Review it before use; `docker compose config` checks it.
+services:
+  web:
+    image: "nginx:1.27-alpine"
+    container_name: "web"
+    restart: "unless-stopped"
+    ports:
+      - "8080:80"
+    volumes:
+      - "web-data:/usr/share/nginx/html"
+    environment:
+      - "TZ=Europe/Stockholm"
+volumes:
+  "web-data":
+    external: true
+```
+
+**The guided part.** dsm shows the file, asks for a stack folder name (in your stacks directory)
+and writes `compose.yaml` there only when you say so. For a container, it then offers to switch
+over:
+
+1. the container is stopped and kept as `<name>-pre-compose`, with its restart policy off so it
+   doesn't come back on reboot
+2. the stack starts with `docker compose up -d`, on the same volumes, so the data is there
+3. if the stack fails to start, the original container gets its name, restart policy and state
+   back, and the `compose.yaml` stays for you to fix
+
+Once you're happy, remove the old container with `docker rm <name>-pre-compose`. Anonymous
+volumes (a `VOLUME` in the image that you never named) are kept by their ID, so even their data
+carries over. For a pasted command, dsm offers to start the stack, creating any external networks
+and volumes it uses that don't exist yet.
+
 ## 🪟 Windows (PowerShell)
 
 On Windows, dsm is a native PowerShell script: no WSL, Git Bash or Cygwin needed, just Docker
@@ -270,6 +343,9 @@ work too, so `dsm -I` and `dsm -v` do what you'd expect:
 | `-Dir C:\docker-stacks` | `-d` | `-d DIR` |
 | `-Update` | `-U` | `-U`, `--update` |
 | `-Version` | | `-V`, `--version` |
+| `-Import NAME` | | `--import NAME` |
+| `-Convert 'docker run ...'` (quoted; `-` reads stdin) | | `--convert docker run ...` |
+| `-Print` | | `--print` |
 
 ```powershell
 cd C:\docker-stacks; dsm -Interactive
@@ -280,6 +356,10 @@ dsm -Help                              # all options
 
 In the TUI, `q`, `Esc` or `Ctrl+C` leave a live view (logs, stats, traffic) and take you back to
 the menu. The filter (`/`) narrows the list as you type.
+
+`-Convert` understands commands written for any shell: `\` (sh), `` ` `` (PowerShell) and `^`
+(cmd) line continuations, and Windows paths such as `-v C:\data:/data`. Pipe one in with
+`Get-Clipboard | dsm -Convert -`.
 
 <details>
 <summary><strong>How the Windows install works</strong></summary>
@@ -342,13 +422,14 @@ On Windows: `.\demo\demo.ps1 up`, `.\demo\demo.ps1 run -Interactive`, `.\demo\de
 
 | Platform | Notes |
 |---|---|
-| **Linux** | Any distro with bash 4+ (Alpine: `apk add bash`). Used daily on Debian |
-| **macOS** | Docker Desktop, OrbStack or Colima, plus `brew install bash`. Run it as `dsm` or `./docker-stacks-manager.sh`, not `bash docker-stacks-manager.sh`, so it picks up Homebrew's bash rather than `/bin/bash` 3.2 |
+| **Linux** | Any distro with bash 4+ or zsh. Used daily on Debian |
+| **macOS** | Docker Desktop, OrbStack or Colima. Nothing else: macOS's bash is 3.2, too old, so the script hands itself over to the zsh every Mac has. A newer bash from Homebrew is used when it's first on your `PATH` |
 | **Windows** | The [PowerShell edition](#-windows-powershell) with Docker Desktop, on Windows PowerShell 5.1 or PowerShell 7 |
 | **Windows, WSL2** | The Bash script, inside a WSL2 distro with Docker Desktop's WSL integration. Behaves exactly like Linux |
 
-CI runs the Bash tests on Linux and macOS, and the PowerShell tests on Windows under both
-PowerShell 5.1 and 7, on every push.
+CI runs the shell tests on Linux and macOS, under both bash and zsh (and checks that macOS's own
+bash 3.2 hands over to zsh), and the PowerShell tests on Windows under both PowerShell 5.1 and 7,
+on every push.
 
 ## ❓ FAQ & troubleshooting
 
@@ -369,10 +450,19 @@ matches. Start it from its own directory with `docker compose up -d`.
 </details>
 
 <details>
-<summary><strong>"This script requires bash 4.0 or higher" (macOS)</strong></summary>
+<summary><strong>"This script needs bash 4.0 or higher, or zsh"</strong></summary>
 
-macOS ships bash 3.2. `brew install bash`, then run `dsm` directly (not `bash dsm`), so the
-`#!/usr/bin/env bash` line finds the new one on your `PATH`.
+Your bash is older than 4.0 and there's no zsh to hand over to. Every Mac has zsh, so this means
+a stripped-down system: install zsh or a newer bash (`apk add bash`, `apt install zsh`, ...).
+</details>
+
+<details>
+<summary><strong>Import: is it safe to switch a container over?</strong></summary>
+
+The original container is never deleted: it's stopped, renamed to `<name>-pre-compose` and kept
+until you remove it yourself, and if the new stack doesn't start it is put back as it was. The
+compose file uses your existing volumes as they are. Still, read the file before you switch: the
+notes at its top say what couldn't be converted.
 </details>
 
 <details>
@@ -444,8 +534,13 @@ Invoke-Pester ./tests/powershell     # PowerShell tests (Pester 5+), also withou
 ./tests/powershell/record.ps1        # re-record their fixtures (needs Docker Desktop)
 ```
 
-For the Bash script:
+For the shell script:
 
+- It runs under bash 4+ and zsh (in its ksh mode). Use the helpers for what differs:
+  `read_char` instead of `read -n`, `read_array` instead of `read -a`, `keys_of` instead of
+  `${!array[@]}`, `lower` instead of `${x,,}`. Write `${s:$i:1}`, not `${s:i:1}`; no quotes
+  inside array subscripts (`a[$k]=`, not `a["$k"]=`); `$NL` instead of `$'\n'` inside `${...}`.
+  `./tests/run.sh` runs everything under zsh too when it's installed
 - Avoid GNU-only flags: no `sed -r`, `grep "a\|b"` (use `grep -E`), `sort -h`, `readlink -f`, or
   `date -d` without a BSD fallback
 - New views read the snapshot (`load_snapshot`) rather than calling `docker` per stack or per

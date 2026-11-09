@@ -117,12 +117,9 @@ info "Shortcut: $LINK"
 
 # Checks that would stop it from running
 bash_major="$(bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 0)"
-if [ "$bash_major" -lt 4 ]; then
-    if [ "$(uname -s)" = Darwin ]; then
-        warn "the bash on your PATH is $(bash -c 'echo $BASH_VERSION'); $NAME needs 4.0+. Install one with: brew install bash"
-    else
-        warn "the bash on your PATH is too old; $NAME needs bash 4.0+"
-    fi
+if [ "$bash_major" -lt 4 ] && ! command -v zsh >/dev/null 2>&1; then
+    # With an older bash (macOS's 3.2) the script runs itself under zsh
+    warn "$NAME needs bash 4.0+ or zsh; neither was found"
 fi
 command -v docker >/dev/null 2>&1 || warn "docker was not found on your PATH"
 

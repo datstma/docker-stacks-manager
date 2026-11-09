@@ -1,0 +1,45 @@
+id	abb5345e0482bdc383da207b12b75a7f2f9bf889c96c5c6a35e5b93e809ec50e
+name	/c1
+image	busybox:1.36
+imageid	sha256:b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d
+state	running
+hostname	abb5345e0482
+domainname	
+user	
+workdir	
+env	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+cmd	sleep
+cmd	3600
+label	com.docker.compose.config-hash=921b53b7d2128295510345262eebdcc57701f6b11e39f5b06ebb1353782433e1
+label	com.docker.compose.container-number=1
+label	com.docker.compose.depends_on=
+label	com.docker.compose.image=sha256:b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d
+label	com.docker.compose.oneoff=False
+label	com.docker.compose.project=conv1
+label	com.docker.compose.project.config_files=/home/you/stacks/conv1/compose.yaml
+label	com.docker.compose.project.working_dir=/home/you/stacks/conv1
+label	com.docker.compose.service=c1
+label	com.docker.compose.version=5.5.0
+tty	false
+stdin	false
+stopsignal	<no value>
+health	null
+bind	vol1:/d:rw
+restart	no|0
+netmode	net1
+privileged	false
+shm	67108864
+memory	0
+nanocpus	0
+pid	
+ipc	private
+readonly	false
+init	<no value>
+logtype	json-file
+runtime	runc
+gpus	
+autoremove	false
+publishall	false
+cmount	volume|vol1|/d
+net	net1||c1,c1
+
