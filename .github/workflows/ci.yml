@@ -58,9 +58,18 @@ jobs:
           Import-Module Pester -MinimumVersion 5.5
           $config = New-PesterConfiguration
           $config.Run.Path = './tests/powershell'
-          $config.Run.Exit = $true
+          $config.Run.PassThru = $true
           $config.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $config
+          $result = Invoke-Pester -Configuration $config
+          # Failures as annotations, readable on the run page without opening the log
+          foreach ($t in $result.Failed) {
+            $msg = ($t.ErrorRecord | Select-Object -First 1).Exception.Message -replace '\r?\n', ' '
+            Write-Output "::error title=$($t.ExpandedPath)::$msg"
+          }
+          foreach ($c in $result.Containers | Where-Object Result -eq 'Failed') {
+            foreach ($e in $c.ErrorRecord) { Write-Output "::error title=Pester container $($c.Item)::$($e.Exception.Message -replace '\r?\n', ' ')" }
+          }
+          if ($result.Result -ne 'Passed') { exit 1 }
 
       - name: Installer round trip
         run: |
