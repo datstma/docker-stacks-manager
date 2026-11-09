@@ -209,6 +209,9 @@ Describe 'End to end (recorded docker output) under <_>' -ForEach $Shells {
             $env:DSM_FAKE_DOCKER = 'replay'; $env:DSM_FAKE_MISSING = $missing; $env:NO_COLOR = '1'
             try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
             Push-Location $Stacks
+            # Windows PowerShell 5.1 turns a native program's stderr into error
+            # records; they must not stop the test when the script reports an error
+            $ErrorActionPreference = 'Continue'
             try {
                 $out = @(& $Shell -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments 2>&1 | ForEach-Object { "$_" })
                 $rc = $LASTEXITCODE
