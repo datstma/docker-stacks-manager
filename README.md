@@ -78,10 +78,18 @@ or Portainer's stack view, but in your terminal, with vim keys.
 <td align="center"><b>Interactive TUI</b> (<code>dsm -I</code>)</td>
 <td align="center"><b>Inside a stack</b> (<code>Enter</code>)</td>
 </tr>
+<tr>
+<td width="50%"><img src="docs/images/import.png" alt="Import menu: paste a docker run command, or pick one of the containers compose doesn't manage"></td>
+<td width="50%"><img src="docs/images/import-done.png" alt="A container switched over to its new compose stack, with the old one kept as notes-pre-compose"></td>
+</tr>
+<tr>
+<td align="center"><b>Import</b> (<code>I</code>)</td>
+<td align="center"><b>Switched over to compose</b></td>
+</tr>
 </table>
 
-All screenshots are real output from the bundled [demo stacks](#-try-it-on-the-demo-stacks),
-recorded with [`demo/screenshots/screenshots.sh`](demo/screenshots/screenshots.sh).
+All screenshots are real output from the bundled [demo stacks](#-try-it-on-the-demo-stacks) (plus a few
+containers started with `docker run` for the import), recorded with [`demo/screenshots/screenshots.sh`](demo/screenshots/screenshots.sh).
 
 ## 🚀 Install
 
@@ -280,6 +288,10 @@ pbpaste | dsm --convert           # read the command from stdin (prints the file
 
 In the TUI, press `I` for the same: pick a container, or paste a command (multi-line commands with
 `\` continuations work).
+
+<p align="center">
+  <img src="docs/images/import-file.png" alt="The compose file generated from the container notes, with the prompt for its stack folder" width="760">
+</p>
 
 **What you get.** For a container, dsm reads `docker inspect` and leaves out everything that
 came from the image (its environment, labels, command), so the file holds what was actually set:

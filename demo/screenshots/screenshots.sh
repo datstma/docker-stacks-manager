@@ -6,7 +6,7 @@
 # so nothing from your own Docker host shows up in the images:
 #   - dsm-dind  the isolated Docker daemon running the demo stacks
 #   - VHS       (github.com/charmbracelet/vhs) types into a real terminal
-#               and records it, following screenshots.tape
+#               and records it, following screenshots.tape and import.tape
 #
 # Needs Docker on the host (with --privileged allowed for the dind container).
 #
@@ -79,14 +79,31 @@ cid=$(docker create docker:27-cli)
 docker cp -q "$cid:/usr/local/bin/docker" "$tools/docker"
 docker cp -q "$cid:/usr/local/libexec/docker/cli-plugins/docker-compose" "$tools/docker-compose"
 docker rm "$cid" >/dev/null
-docker run --rm --network "$NET" -e DOCKER_HOST="tcp://$DIND:2375" \
-    "${mounts[@]}" \
-    -v "$ROOT/docker-stacks-manager.sh:/usr/local/bin/dsm:ro" \
-    -v "$tools/docker:/usr/local/bin/docker:ro" \
-    -v "$tools/docker-compose:/usr/local/libexec/docker/cli-plugins/docker-compose:ro" \
-    -v "$ROOT/demo/screenshots/screenshots.tape:/vhs/screenshots.tape:ro" \
-    -v "$OUT:/vhs/out" \
-    ghcr.io/charmbracelet/vhs:latest screenshots.tape
+record() { # record <tape>
+    docker run --rm --network "$NET" -e DOCKER_HOST="tcp://$DIND:2375" \
+        "${mounts[@]}" \
+        -v "$ROOT/docker-stacks-manager.sh:/usr/local/bin/dsm:ro" \
+        -v "$tools/docker:/usr/local/bin/docker:ro" \
+        -v "$tools/docker-compose:/usr/local/libexec/docker/cli-plugins/docker-compose:ro" \
+        -v "$ROOT/demo/screenshots/$1:/vhs/$1:ro" \
+        -v "$OUT:/vhs/out" \
+        ghcr.io/charmbracelet/vhs:latest "$1"
+}
+record screenshots.tape
+
+# Import: a few containers started with plain docker run. Only now, so they
+# don't show up in the views recorded above.
+echo "Starting standalone containers for the import screenshots..."
+in_dind "
+    set -e
+    docker run --name ddns-updater -e DOMAIN=home.example.org busybox:1.36 true
+    docker run -d --name speedtest --restart on-failure:3 --memory 64m busybox:1.36 sleep 1d
+    docker run -d --name notes --restart unless-stopped -p 8081:80 -e TZ=Europe/Berlin \\
+        -v notes-data:/www -v /srv/notes/conf:/etc/notes:ro \\
+        --label com.centurylinklabs.watchtower.enable=true \\
+        busybox:1.36 httpd -f -p 80 -h /www
+" >/dev/null
+record import.tape
 
 # VHS runs as root: hand the files back
 docker run --rm -v "$OUT:/out" --entrypoint chown ghcr.io/charmbracelet/vhs:latest -R "$(id -u):$(id -g)" /out
