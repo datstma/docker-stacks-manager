@@ -52,7 +52,7 @@ param(
     [Alias('h')][switch]$Help
 )
 
-$script:DsmVersion = '1.2.0'
+$script:DsmVersion = '1.2.1'
 $script:ImportGiven = $PSBoundParameters.ContainsKey('Import')
 $script:ConvertGiven = $PSBoundParameters.ContainsKey('Convert')
 $script:DsmRepo = 'datstma/docker-stacks-manager'
