@@ -35,7 +35,7 @@ set -o pipefail
 DSM_SELF="$0"
 NL=$'\n'   # zsh does not expand $'\n' inside ${var:+...}
 
-VERSION="1.2.1"
+VERSION="1.2.2"
 DSM_REPO="datstma/docker-stacks-manager"
 
 # Base directory holding the stacks: -d/--dir, else $DSM_DIR, else the

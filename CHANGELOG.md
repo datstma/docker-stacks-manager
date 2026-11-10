@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] - 2026-11-10
+
+### Changed
+
+- The README shows the import feature: the import menu, the generated compose file and a container switched over to its stack (recorded by `demo/screenshots/import.tape`).
+
 ## [1.2.1] - 2026-11-10
 
 ### Fixed
@@ -68,6 +74,7 @@ First public release.
 - Runs on Linux, macOS (bash 4+ from Homebrew) and Windows (WSL2, Git Bash);
   test suite runs without Docker
 
+[1.2.2]: https://github.com/datstma/docker-stacks-manager/releases/tag/v1.2.2
 [1.2.1]: https://github.com/datstma/docker-stacks-manager/releases/tag/v1.2.1
 [1.2.0]: https://github.com/datstma/docker-stacks-manager/releases/tag/v1.2.0
 [1.1.0]: https://github.com/datstma/docker-stacks-manager/releases/tag/v1.1.0
